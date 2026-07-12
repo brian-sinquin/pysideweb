@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="PySideWeb — PySide6 UI rendered in your browser">
+    <title>PySideWeb</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Connection status indicator -->
+    <div id="connection-status" class="status-disconnected">
+        <span class="status-dot"></span>
+        <span class="status-text">Connecting...</span>
+    </div>
+
+    <!-- Main application container -->
+    <div id="app">
+        <div class="loading-screen">
+            <div class="loading-spinner"></div>
+            <p class="loading-text">Waiting for PySideWeb application...</p>
+            <p class="loading-hint">The Python app will render here automatically</p>
+        </div>
+    </div>
+
+    <script src="/static/renderer.js"></script>
+</body>
+</html>
