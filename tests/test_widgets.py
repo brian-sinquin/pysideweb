@@ -57,6 +57,25 @@ class TestQSlider:
         assert s.value() == 30
         assert seen == [30]
 
+    def test_set_value_emits_when_changed(self):
+        # Match Qt: programmatic setValue emits valueChanged when the value changes.
+        s = QSlider()
+        s.setRange(0, 10)
+        seen = []
+        s.valueChanged.connect(seen.append)
+        s.setValue(5)
+        assert s.value() == 5
+        assert seen == [5]
+
+    def test_set_value_no_emit_when_unchanged(self):
+        s = QSlider()
+        s.setRange(0, 10)
+        s.setValue(5)
+        seen = []
+        s.valueChanged.connect(seen.append)
+        s.setValue(5)  # same value → no signal
+        assert seen == []
+
 
 class TestLayout:
     def test_add_widget_registers_child_in_tree(self):

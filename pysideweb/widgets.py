@@ -985,8 +985,12 @@ class QSlider(QWidget):
         return self._value
 
     def setValue(self, val: int):
-        self._value = max(self._minimum, min(self._maximum, val))
+        new = max(self._minimum, min(self._maximum, val))
+        changed = new != self._value
+        self._value = new
         self._notify("value", self._value)
+        if changed:  # match Qt: programmatic setValue emits valueChanged
+            self._signal_valueChanged.emit(self._value)
 
     def minimum(self) -> int:
         return self._minimum
@@ -1124,8 +1128,12 @@ class QSpinBox(QWidget):
         return self._value
 
     def setValue(self, val: int):
-        self._value = max(self._minimum, min(self._maximum, val))
+        new = max(self._minimum, min(self._maximum, val))
+        changed = new != self._value
+        self._value = new
         self._notify("value", self._value)
+        if changed:  # match Qt: programmatic setValue emits valueChanged
+            self._signal_valueChanged.emit(self._value)
 
     def minimum(self) -> int:
         return self._minimum

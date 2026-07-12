@@ -17,7 +17,7 @@ uv pip install -e ".[dev]"
 Run an example to confirm everything works:
 
 ```bash
-uv run python examples/hello.py
+uv run python examples/preferences.py
 # then open http://localhost:8765
 ```
 

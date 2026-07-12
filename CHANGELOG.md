@@ -7,13 +7,15 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
-- New examples: `smart_home.py` (device toggles, dimmers, thermostat, scenes, live energy
-  meter) and `kanban.py` (add/move/delete tasks across columns with a completion bar),
-  plus an `examples/README.md` index.
+- Examples: `preferences.py` (an application settings screen) and `contacts.py` (a
+  master–detail record manager), with a restrained, professional visual style, plus an
+  `examples/README.md` index. Replaces the earlier demo set.
 - Test suite (`tests/`) covering the interceptor, core signal/value types, widgets, and
   state serialization.
 
 ### Fixed
+- `QSlider.setValue` and `QSpinBox.setValue` now emit `valueChanged` when the value
+  changes, matching Qt behavior for programmatic updates.
 - Serialization crashed on a layout nested inside another sub-layout (doubly-nested
   `addLayout`); `_serialize_layout_as_container` now recurses into nested layouts and
   guards against `None` item ids.
