@@ -116,9 +116,16 @@ see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 🧪 Examples
 
-- [`examples/hello.py`](examples/hello.py) — the smallest possible app
-- [`examples/demo_app.py`](examples/demo_app.py) — a multi-tab "phone" UI showcasing widgets
-- [`examples/demo_simulation.py`](examples/demo_simulation.py) — a live-updating simulation
+Run any with `uv run python examples/<name>.py`, then open http://localhost:8765.
+See [`examples/README.md`](examples/README.md) for the full list.
+
+- [`hello.py`](examples/hello.py) — the smallest possible app (button + click counter)
+- [`smart_home.py`](examples/smart_home.py) — a Smart Home control panel: device toggles,
+  dimmers, thermostat, scenes, and a live energy meter
+- [`kanban.py`](examples/kanban.py) — a Kanban task board: add tasks and move them across
+  To Do → In Progress → Done with a live completion bar
+- [`demo_app.py`](examples/demo_app.py) — a multi-tab "phone" UI showcasing many widgets
+- [`demo_simulation.py`](examples/demo_simulation.py) — a live CPU/memory monitor + sim
 
 ## 🗺️ Roadmap
 

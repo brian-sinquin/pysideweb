@@ -2,7 +2,13 @@
 
 import json
 
-from PySide6.QtWidgets import QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from pysideweb import state
 
@@ -49,3 +55,27 @@ def test_dispatch_event_routes_to_widget():
 def test_dispatch_event_unknown_widget_is_noop():
     # Should not raise for an unknown id.
     state.dispatch_event({"id": "does-not-exist", "event": "clicked"})
+
+
+def test_doubly_nested_layouts_serialize():
+    # A layout nested inside another sub-layout must serialize without error.
+    # (Regression: _serialize_layout_as_container used to choke on nested layouts.)
+    w = QWidget()
+    outer = QVBoxLayout(w)
+
+    row = QHBoxLayout()          # sub-layout of outer
+    inner = QVBoxLayout()        # sub-layout of the sub-layout
+    inner.addWidget(QLabel("deep"))
+    row.addLayout(inner)
+    outer.addLayout(row)
+    w.show()
+
+    tree = json.loads(state.full_tree_json())
+    # Walk the tree and confirm the deeply nested label made it through.
+    def texts(node):
+        out = [node.get("props", {}).get("text")]
+        for c in node.get("children", []):
+            out += texts(c)
+        return out
+
+    assert "deep" in texts(tree["roots"][0])

@@ -133,8 +133,8 @@ def serialize_widget(widget) -> dict:
             elif hasattr(item, '_layout') and item._layout is not None:
                 # Nested layout
                 data["children"].append(_serialize_layout_as_container(item._layout))
-            elif hasattr(item, '_wid'):
-                # Direct widget
+            elif getattr(item, '_wid', None) is not None:
+                # Direct widget or stretch spacer
                 data["children"].append(serialize_widget(item))
 
     # Serialize direct children (added via setParent or addWidget)
@@ -158,7 +158,10 @@ def _serialize_layout_as_container(layout) -> dict:
     for item in layout._items:
         if hasattr(item, '_widget') and item._widget is not None:
             data["children"].append(serialize_widget(item._widget))
-        elif hasattr(item, '_wid'):
+        elif hasattr(item, '_layout') and item._layout is not None:
+            # Nested layout (e.g. addLayout inside addLayout)
+            data["children"].append(_serialize_layout_as_container(item._layout))
+        elif getattr(item, '_wid', None) is not None:
             data["children"].append(serialize_widget(item))
     return data
 

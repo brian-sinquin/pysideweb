@@ -7,8 +7,16 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- New examples: `smart_home.py` (device toggles, dimmers, thermostat, scenes, live energy
+  meter) and `kanban.py` (add/move/delete tasks across columns with a completion bar),
+  plus an `examples/README.md` index.
 - Test suite (`tests/`) covering the interceptor, core signal/value types, widgets, and
   state serialization.
+
+### Fixed
+- Serialization crashed on a layout nested inside another sub-layout (doubly-nested
+  `addLayout`); `_serialize_layout_as_container` now recurses into nested layouts and
+  guards against `None` item ids.
 - Continuous integration (GitHub Actions) running ruff + pytest on Python 3.10–3.13.
 - `examples/hello.py` minimal example; demos moved under `examples/`.
 - Project documentation: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `docs/ARCHITECTURE.md`,
