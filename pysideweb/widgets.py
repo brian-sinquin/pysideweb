@@ -368,13 +368,10 @@ class QFrame(QWidget):
 
     frameShape = Prop(NoFrame)
     frameShadow = Prop(Plain)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._line_width = 1
-
-    def setLineWidth(self, w: int):
-        self._line_width = w
+    # `lineWidth` had no getter at all in the hand-written version (only
+    # setLineWidth() existed, storing into an otherwise-unread
+    # `self._line_width`) — Prop gives it a matching getter for free.
+    lineWidth = Prop(1)
 
 # ---------------------------------------------------------------------------
 # QPushButton
@@ -387,13 +384,13 @@ class QPushButton(QWidget):
 
     text = Prop("", notify=True)
     checked = Prop(False, notify=True, getter="isChecked")
+    checkable = Prop(False, getter="isCheckable")
+    flat = Prop(False, getter="isFlat")
 
     def __init__(self, text: str = "", parent=None, icon=None):
         super().__init__(parent)
         self._props["text"] = text
         self._icon = icon or QIcon()
-        self._checkable = False
-        self._flat = False
         self._auto_default = False
 
     def setIcon(self, icon):
@@ -403,15 +400,6 @@ class QPushButton(QWidget):
     def icon(self):
         return self._icon
 
-    def setCheckable(self, checkable: bool):
-        self._checkable = checkable
-
-    def isCheckable(self) -> bool:
-        return self._checkable
-
-    def setFlat(self, flat: bool):
-        self._flat = flat
-
     def setDefault(self, default: bool):
         self._auto_default = default
 
@@ -420,17 +408,15 @@ class QPushButton(QWidget):
 
     def _get_props(self) -> dict:
         props = super()._get_props()
-        props["checkable"] = self._checkable
-        props["flat"] = self._flat
         if self._icon and not self._icon.isNull():
             props["icon"] = self._icon.text()
         return props
 
     def _handle_event(self, event_type, value):
         if event_type == "clicked":
-            if self._checkable:
+            if self.isCheckable():
                 self.setChecked(not self.isChecked())
-            self.clicked.emit(self.isChecked() if self._checkable else False)
+            self.clicked.emit(self.isChecked() if self.isCheckable() else False)
 
 # ---------------------------------------------------------------------------
 # QLabel
