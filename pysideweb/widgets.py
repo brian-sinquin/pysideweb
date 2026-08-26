@@ -245,7 +245,10 @@ class QWidget:
     def deleteLater(self):
         if self._parent and hasattr(self._parent, '_children'):
             self._parent._children = [c for c in self._parent._children if c is not self]
-        state.unregister_widget(self._wid)
+        # Unregisters this widget's whole subtree (its own children, plus
+        # anything placed in its layout), not just this one id -- see
+        # unregister_subtree()'s docstring for why that matters.
+        state.unregister_subtree(self)
         state.notify_full_refresh()
 
     def close(self):

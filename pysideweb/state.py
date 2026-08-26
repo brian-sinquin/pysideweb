@@ -45,6 +45,39 @@ def unregister_widget(wid: str):
         _root_widgets[:] = [w for w in _root_widgets if w._wid != wid]
 
 
+def _iter_layout_child_widgets(layout):
+    """Every widget reachable from `layout`, including through nested
+    sub-layouts (addLayout inside addLayout) -- same shape as
+    _append_layout_children, but yielding widgets instead of serializing."""
+    for item in layout._items:
+        widget = getattr(item, "_widget", None)
+        if widget is not None:
+            yield widget
+        sub_layout = getattr(item, "_layout", None)
+        if sub_layout is not None:
+            yield from _iter_layout_child_widgets(sub_layout)
+
+
+def unregister_subtree(widget) -> None:
+    """Unregister `widget` and every descendant still reachable from it
+    (its `_children` and everything placed in its `_layout`, recursively).
+
+    `deleteLater()` used to only unregister the widget itself -- every
+    descendant stayed in the id->widget registry (and, through their own
+    `_parent`/closures, unreachable-by-nothing-but-still-referenced by
+    Python's GC) for the remaining lifetime of the app. A dynamic list or
+    tab set that creates and discards subtrees would leak one registry
+    entry per discarded widget, forever.
+    """
+    for child in list(getattr(widget, "_children", ())):
+        unregister_subtree(child)
+    layout = getattr(widget, "_layout", None)
+    if layout is not None:
+        for child in _iter_layout_child_widgets(layout):
+            unregister_subtree(child)
+    unregister_widget(widget._wid)
+
+
 def get_widget(wid: str):
     with _lock:
         return _widgets.get(wid)
@@ -98,11 +131,36 @@ def notify_full_refresh():
 
 
 def drain_changes() -> list[dict]:
-    """Drain and return all pending changes."""
+    """Drain all pending changes, coalesced to the latest value per
+    (widget, prop) pair.
+
+    The broadcast loop only runs every _BROADCAST_INTERVAL (~50ms), so a
+    single drain can accumulate many updates to the same property -- a
+    slider mid-drag or text typed character by character both fire a
+    notify_change() per event, but only the last value in a batch is ever
+    going to matter once it reaches the browser. Sending the intermediate
+    ones is pure waste on both ends of the socket. Any `full_refresh`
+    markers are likewise collapsed to at most one.
+    """
     with _lock:
         changes = list(_change_queue)
         _change_queue.clear()
+
+    if not changes:
         return changes
+
+    updates: dict[tuple[str, str], dict] = {}
+    has_full_refresh = False
+    for change in changes:
+        if change.get("type") == "full_refresh":
+            has_full_refresh = True
+        else:
+            updates[(change["id"], change["prop"])] = change
+
+    result = list(updates.values())
+    if has_full_refresh:
+        result.append({"type": "full_refresh"})
+    return result
 
 
 def add_change_listener(listener: Callable):
