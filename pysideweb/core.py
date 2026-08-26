@@ -28,7 +28,6 @@ class Signal:
 
     def __init__(self, *arg_types: type):
         self._arg_types = arg_types
-        self._slots: list[Callable] = []
         self._name: str = ""
         self._owner: Any = None
 
@@ -45,39 +44,56 @@ class Signal:
             object.__setattr__(obj, key, bound)
         return object.__getattribute__(obj, key)
 
+def _slot_arity(slot: Callable) -> tuple[bool, int]:
+    """Precompute how many positional args `slot` accepts, once, at connect()
+    time rather than re-running `inspect.signature()` on every single
+    `emit()` -- a slot stays connected far longer than any one emit (e.g. a
+    slider dragged at 60fps re-invokes the same connected slot thousands of
+    times), so paying the introspection cost once per connection is strictly
+    cheaper than paying it once per emission.
+
+    Returns (accepts_all_args, max_positional_params). A callable whose
+    signature can't be introspected (some builtins) is treated as accepting
+    everything, matching the previous fallback behavior.
+    """
+    try:
+        sig = inspect.signature(slot)
+    except ValueError:
+        return True, 0
+    if any(p.kind == p.VAR_POSITIONAL for p in sig.parameters.values()):
+        return True, 0
+    max_params = sum(
+        1 for p in sig.parameters.values()
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    )
+    return False, max_params
+
+
 class BoundSignal:
     """A signal bound to a specific widget instance."""
 
     def __init__(self, signal: Signal, owner: Any):
         self._signal = signal
         self._owner = owner
-        self._slots: list[Callable] = []
+        # (slot, accepts_all_args, max_positional_params) -- see _slot_arity().
+        self._slots: list[tuple[Callable, bool, int]] = []
 
     def connect(self, slot: Callable):
-        self._slots.append(slot)
+        self._slots.append((slot, *_slot_arity(slot)))
 
     def disconnect(self, slot: Callable | None = None):
         if slot is None:
             self._slots.clear()
         else:
-            self._slots = [s for s in self._slots if s is not slot]
+            self._slots = [s for s in self._slots if s[0] is not slot]
 
     def emit(self, *args):
-        for slot in self._slots[:]:  # copy to allow modification during iteration
+        for slot, accepts_all, max_params in self._slots[:]:  # copy: allow modification during iteration
             try:
-                try:
-                    sig = inspect.signature(slot)
-                    has_var_positional = any(p.kind == p.VAR_POSITIONAL for p in sig.parameters.values())
-                    if has_var_positional:
-                        slot(*args)
-                    else:
-                        max_params = sum(
-                            1 for p in sig.parameters.values()
-                            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-                        )
-                        slot(*args[:max_params])
-                except ValueError:
+                if accepts_all:
                     slot(*args)
+                else:
+                    slot(*args[:max_params])
             except Exception as e:
                 print(f"[PySideWeb] Signal error in {self._signal._name}: {e}")
 
