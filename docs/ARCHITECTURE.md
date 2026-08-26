@@ -31,6 +31,15 @@ Builds fake module objects for `PySide6`, `PySide6.QtWidgets`, `PySide6.QtCore`,
 them into `sys.modules`. Any later `from PySide6.QtWidgets import QPushButton` therefore
 resolves to `pysideweb.widgets.QPushButton` instead of native Qt.
 
+Every one of those fake modules also carries a [PEP 562](https://peps.python.org/pep-0562/)
+module-level `__getattr__`, and a `sys.meta_path` finder covers the one case that mechanism
+doesn't (`import PySide6.<Something>` for a submodule not stubbed at all, e.g. `QtCharts`).
+So importing a class/submodule PySideWeb doesn't implement never raises — it generates and
+caches a permissive placeholder instead (`core._AutoAttr`, or a real `QWidget` subclass for
+anything from `QtWidgets`). This is what lets third-party PySide6 libraries, not just apps
+written directly against PySideWeb, at least run without crashing. See the README's
+"Working with third-party PySide6 libraries" section.
+
 ### `core.py`
 The QtCore surface, reimplemented in pure Python:
 - **`Signal` / `BoundSignal`** — a descriptor-based signal/slot system. `emit()` inspects
@@ -90,7 +99,11 @@ provides the visual theme.
 
 ## Known limitations
 
-- Not every Qt method/property is implemented — the common app surface is prioritized.
+- Not every Qt method/property is implemented — the common app surface is prioritized. The
+  universal fallback (see `interceptor.py` above) means missing API degrades to an inert
+  placeholder instead of crashing, but "doesn't crash" isn't "works" — an unrendered
+  third-party widget (a plot, a graphics view, ...) is still just an empty, dashed-outline
+  box until PySideWeb implements a real renderer for it.
 - One shared widget tree is broadcast to all connected browsers (no per-session isolation
   yet).
 - QSS/stylesheets are not translated to CSS.

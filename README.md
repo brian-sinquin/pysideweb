@@ -82,6 +82,28 @@ Not every Qt method is implemented; PySideWeb targets the common application sur
 Missing something? [Open an issue](https://github.com/brian-sinquin/pysideweb/issues) or see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### Working with third-party PySide6 libraries
+
+PySideWeb is meant to run more than apps written directly against it — including libraries
+built on PySide6 that you pull in from PyPI or GitHub (a plotting widget, a custom control
+kit, and so on). Any class or method those libraries use that PySideWeb doesn't implement
+degrades to a harmless placeholder instead of crashing your app:
+
+- An unimplemented **widget class** (`QGraphicsView`, a third-party `PlotWidget`, ...) is
+  still a real widget — it can be added to layouts and shown — but renders as an empty box
+  (with a dashed outline and its class name, so it's clearly marked as unsupported rather
+  than looking like a bug) since PySideWeb has no renderer for it.
+- An unimplemented **method** on a widget PySideWeb *does* support, or on one of the
+  placeholders above, is silently ignored rather than raising `AttributeError`.
+- An unimplemented **value type** (`QTransform`, `QPen`, ...) or **submodule**
+  (`PySide6.QtCharts`, ...) behaves the same way: constructible, chainable, and inert.
+
+The console prints a one-time note the first time each unimplemented name is used, so you
+can see what's missing. This makes the rest of your UI usable even when it embeds something
+PySideWeb can't yet render — but that embedded piece itself won't show anything meaningful
+until PySideWeb implements it. If you hit something you'd like supported for real, please
+[open an issue](https://github.com/brian-sinquin/pysideweb/issues).
+
 ## Configuration
 
 | Environment variable | Default     | Description |

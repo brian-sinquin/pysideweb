@@ -99,6 +99,58 @@ class BoundSignal:
 
 
 # ---------------------------------------------------------------------------
+# Universal fallback: absorb calls to Qt API pysideweb hasn't implemented
+# ---------------------------------------------------------------------------
+#
+# pysideweb only implements a subset of Qt. Third-party PySide6 code (e.g.
+# a library found on GitHub, not just an app written directly against
+# pysideweb) routinely calls methods, instantiates classes, and imports
+# submodules well outside that subset. Without a fallback, any of that is a
+# hard crash: an ImportError on `from PySide6.QtWidgets import <unknown>`,
+# or an AttributeError the first time unimplemented-but-called method runs.
+#
+# _AutoAttr is a permissive "black hole" object: any attribute access or
+# call on it succeeds and returns itself, so arbitrary chains like
+# `obj.viewport().update()` or `obj.setSomething(1, 2).andChain()` never
+# raise -- they just quietly do nothing. It's returned by
+# interceptor.py's per-module fallback (for classes/constants pysideweb
+# never heard of) and by QWidget.__getattr__ (for methods pysideweb hasn't
+# implemented on a class it does otherwise support).
+#
+# Names starting with "_" are deliberately NOT absorbed -- pysideweb's own
+# code relies on hasattr()/getattr(x, "_foo", None) style duck typing
+# throughout (state.py walking `_widget`/`_layout`/`_wid`, widgets.py
+# checking `_children`, etc.); silently answering those with a truthy
+# placeholder instead of a real AttributeError would corrupt that internal
+# bookkeeping. Only public, Qt-API-looking names are absorbed.
+
+class _AutoAttr:
+    """Silently absorbs attribute access and calls for Qt API pysideweb
+    doesn't implement, so unrecognized methods/classes degrade to a no-op
+    instead of crashing the app. See the module comment above."""
+
+    def __init__(self, *args, **kwargs):
+        pass  # Accept (and ignore) any constructor signature.
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self
+
+    def __bool__(self):
+        return False
+
+    def __iter__(self):
+        return iter(())
+
+    def __repr__(self):
+        return f"<pysideweb unimplemented: {type(self).__name__}>"
+
+
+# ---------------------------------------------------------------------------
 # Reflective property engine
 # ---------------------------------------------------------------------------
 #

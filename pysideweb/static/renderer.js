@@ -314,9 +314,13 @@
 
         if (!el) {
             // Create a new element
-            const renderer = RENDERERS[node.type] || renderGenericWidget;
-            el = renderer(node);
+            const known = Object.prototype.hasOwnProperty.call(RENDERERS, node.type);
+            el = (known ? RENDERERS[node.type] : renderGenericWidget)(node);
             el.dataset.wid = node.id;
+            if (!known) {
+                el.classList.add("widget-unsupported");
+                el.title = `${node.type}: not implemented by pysideweb`;
+            }
             isNew = true;
         }
 
@@ -929,10 +933,21 @@
     function renderWidget(node) {
         if (!node || !node.type) return null;
 
-        const renderer = RENDERERS[node.type] || renderGenericWidget;
-        const el = renderer(node);
+        const known = Object.prototype.hasOwnProperty.call(RENDERERS, node.type);
+        const el = (known ? RENDERERS[node.type] : renderGenericWidget)(node);
 
         if (!el) return null;
+
+        // A type pysideweb doesn't implement (third-party PySide6 code
+        // routinely uses classes far outside pysideweb's supported set --
+        // see interceptor.py's unknown-class fallback) still renders --
+        // as an empty box via renderGenericWidget -- but is marked so it's
+        // visually distinguishable from an intentionally empty QWidget
+        // rather than looking like a bug.
+        if (!known) {
+            el.classList.add("widget-unsupported");
+            el.title = `${node.type}: not implemented by pysideweb`;
+        }
 
         // Apply common props
         el.dataset.wid = node.id;

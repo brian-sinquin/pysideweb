@@ -18,8 +18,11 @@ from .core import (
     QSize,
     Qt,
     Signal,
+    _AutoAttr,
     _register_props,
 )
+
+_warned_unknown_methods: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Base: QWidget
@@ -296,6 +299,30 @@ class QWidget:
     def _handle_event(self, event_type: str, value: Any):
         """Handle events dispatched from the browser."""
         pass
+
+    def __getattr__(self, name: str):
+        """Fallback for methods pysideweb hasn't implemented on this widget.
+
+        Only reached when normal attribute lookup already failed -- every
+        method pysideweb *does* implement (including ones synthesized by
+        Prop()) is found first and never comes through here. Names starting
+        with "_" are excluded and raise normally: pysideweb's own internals
+        rely on hasattr(widget, "_children")-style duck typing, and
+        answering those with a placeholder instead of a real AttributeError
+        would silently corrupt that bookkeeping (see core.py's _AutoAttr
+        docstring). This exists so third-party PySide6 code -- not just
+        code written directly against pysideweb -- can call widget methods
+        pysideweb hasn't gotten around to without crashing the app; the
+        call just becomes a no-op.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        key = f"{type(self).__name__}.{name}"
+        if key not in _warned_unknown_methods:
+            _warned_unknown_methods.add(key)
+            print(f"[PySideWeb] Note: {key}() is not implemented -- ignoring the call. "
+                  f"If you need it, please open an issue.")
+        return _AutoAttr()
 
 # QWidget doesn't go through __init_subclass__ itself (that hook only fires
 # for subclasses), so its own Prop() declarations are registered explicitly

@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Universal fallback for PySide6 API PySideWeb doesn't implement, so third-party PySide6
+  libraries (not just apps written directly against PySideWeb) degrade gracefully instead
+  of crashing: an unimplemented `QtWidgets` class becomes a real, addable/showable
+  `QWidget` placeholder; an unimplemented method on any widget is silently absorbed; an
+  unimplemented value type (`QTransform`, ...) or submodule (`PySide6.QtCharts`, ...) is
+  constructible, chainable, and inert. The renderer marks a placeholder widget visually
+  (dashed outline + class name) so it reads as "unsupported", not as a bug. `core._AutoAttr`
+  is the underlying permissive object; `interceptor.py`'s per-module `__getattr__` (plus a
+  `sys.meta_path` finder for bare `import PySide6.<Something>`) is the entry point.
+  pysideweb's own internal duck typing (`hasattr(widget, "_children")` and similar) is
+  unaffected -- only public, non-underscore-prefixed names are absorbed.
+
 ### Security
 - Renderer: `QLabel`/`QPushButton` text containing `<...>` was rendered via `innerHTML`
   with no sanitization -- text reaching a label often originates from data the app
