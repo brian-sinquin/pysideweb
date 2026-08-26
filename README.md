@@ -84,9 +84,10 @@ Missing something? [Open an issue](https://github.com/brian-sinquin/pysideweb/is
 
 ## Configuration
 
-| Environment variable | Default | Description |
-|----------------------|---------|-------------|
-| `PYSIDEWEB_PORT`     | `8765`  | Port for the HTTP and WebSocket server |
+| Environment variable | Default     | Description |
+|----------------------|-------------|-------------|
+| `PYSIDEWEB_PORT`     | `8765`       | Port for the HTTP and WebSocket server |
+| `PYSIDEWEB_HOST`     | `127.0.0.1`  | Interface to bind to. The `/ws` endpoint has no authentication, so anything that can reach it can inspect and drive your app's UI — only set this to `0.0.0.0` (or a specific LAN address) if you intend to open the app to other devices on your network, and understand that anyone on that network can then control it. |
 
 ## Examples
 

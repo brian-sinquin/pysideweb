@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Security
+- Renderer: `QLabel`/`QPushButton` text containing `<...>` was rendered via `innerHTML`
+  with no sanitization -- text reaching a label often originates from data the app
+  didn't author (a network response, user input echoed back), making this a direct DOM
+  XSS sink even though real Qt's rich-text renderer never executes script. An
+  allowlist-based sanitizer (`sanitizeRichText` in `renderer.js`) now strips
+  non-formatting tags and event-handler/`javascript:` attributes before the HTML is
+  ever assigned.
+- Server: `TCPSite` bound to `0.0.0.0` unconditionally, exposing the unauthenticated
+  `/ws` endpoint (full read/write access to the app's widget tree) to the whole LAN by
+  default. Now defaults to `127.0.0.1`; set `PYSIDEWEB_HOST` to opt into wider exposure.
+
 ### Added
 - Examples: `preferences.py` (an application settings screen) and `contacts.py` (a
   master–detail record manager), with a restrained, professional visual style, plus an
