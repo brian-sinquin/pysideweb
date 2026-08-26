@@ -593,23 +593,29 @@ class QComboBox(QWidget):
     currentIndexChanged = Signal(int)
     currentTextChanged = Signal(str)
 
+    # Was hand-tracked as `self._current_index` with a manual `_notify()` call
+    # in every mutator plus a `currentIndexChanged.emit()` duplicated in
+    # `_handle_event`; as a Prop, storage/notify/getter/setter are generated
+    # and `currentIndexChanged` is emitted for free whenever the value
+    # actually changes (previously only emitted from the browser-event path).
+    currentIndex = Prop(-1, notify=True, signal="currentIndexChanged", cast=int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: list[str] = []
-        self._current_index = -1
         self._editable = False
 
     def addItem(self, text: str, data=None):
         self._items.append(text)
-        if self._current_index < 0:
-            self._current_index = 0
+        if self.currentIndex() < 0:
+            self.setCurrentIndex(0)
         self._notify("items", self._items)
 
     def addItems(self, texts: list[str]):
         for t in texts:
             self._items.append(t)
-        if self._current_index < 0 and self._items:
-            self._current_index = 0
+        if self.currentIndex() < 0 and self._items:
+            self.setCurrentIndex(0)
         self._notify("items", self._items)
 
     def insertItem(self, index: int, text: str):
@@ -618,24 +624,18 @@ class QComboBox(QWidget):
     def removeItem(self, index: int):
         if 0 <= index < len(self._items):
             self._items.pop(index)
-            if self._current_index >= len(self._items):
-                self._current_index = len(self._items) - 1
+            if self.currentIndex() >= len(self._items):
+                self.setCurrentIndex(len(self._items) - 1)
 
     def clear(self):
         self._items.clear()
-        self._current_index = -1
+        self.setCurrentIndex(-1)
         self._notify("items", [])
 
-    def currentIndex(self) -> int:
-        return self._current_index
-
-    def setCurrentIndex(self, idx: int):
-        self._current_index = idx
-        self._notify("currentIndex", idx)
-
     def currentText(self) -> str:
-        if 0 <= self._current_index < len(self._items):
-            return self._items[self._current_index]
+        idx = self.currentIndex()
+        if 0 <= idx < len(self._items):
+            return self._items[idx]
         return ""
 
     def setCurrentText(self, text: str):
@@ -654,15 +654,12 @@ class QComboBox(QWidget):
     def _get_props(self) -> dict:
         props = super()._get_props()
         props["items"] = self._items
-        props["currentIndex"] = self._current_index
         props["editable"] = self._editable
         return props
 
     def _handle_event(self, event_type, value):
         if event_type == "currentIndexChanged":
-            idx = int(value)
-            self._current_index = idx
-            self.currentIndexChanged.emit(idx)
+            self.setCurrentIndex(int(value))
             self.currentTextChanged.emit(self.currentText())
 
 # ---------------------------------------------------------------------------
@@ -858,11 +855,13 @@ class QTabWidget(QWidget):
 
     currentChanged = Signal(int)
 
+    currentIndex = Prop(0, notify=True, signal="currentChanged", cast=int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._tabs: list[dict] = []  # [{text, icon, widget}]
-        self._current_index = 0
         self._tab_position = 0
+
     def addTab(self, widget: QWidget, *args) -> int:
         icon = None
         text = ""
@@ -886,16 +885,8 @@ class QTabWidget(QWidget):
     def removeTab(self, index: int):
         if 0 <= index < len(self._tabs):
             self._tabs.pop(index)
-            if self._current_index >= len(self._tabs):
-                self._current_index = max(0, len(self._tabs) - 1)
-
-    def setCurrentIndex(self, index: int):
-        self._current_index = index
-        self._notify("currentIndex", index)
-        self.currentChanged.emit(index)
-
-    def currentIndex(self) -> int:
-        return self._current_index
+            if self.currentIndex() >= len(self._tabs):
+                self.setCurrentIndex(max(0, len(self._tabs) - 1))
 
     def count(self) -> int:
         return len(self._tabs)
@@ -932,7 +923,6 @@ class QTabWidget(QWidget):
             }
             for t in self._tabs
         ]
-        props["currentIndex"] = self._current_index
         return props
 
     def _handle_event(self, event_type, value):
@@ -963,10 +953,11 @@ class QGroupBox(QWidget):
 class QScrollArea(QWidget):
     _widget_type = "QScrollArea"
 
+    widgetResizable = Prop(True)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._widget_inside = None
-        self._widget_resizable = True
 
     def setWidget(self, widget: QWidget):
         self._widget_inside = widget
@@ -974,9 +965,6 @@ class QScrollArea(QWidget):
 
     def widget(self):
         return self._widget_inside
-
-    def setWidgetResizable(self, resizable: bool):
-        self._widget_resizable = resizable
 
     def setHorizontalScrollBarPolicy(self, policy):
         pass
@@ -986,7 +974,6 @@ class QScrollArea(QWidget):
 
     def _get_props(self) -> dict:
         props = super()._get_props()
-        props["widgetResizable"] = self._widget_resizable
         if self._widget_inside:
             props["innerWidgetId"] = self._widget_inside._wid
         return props
@@ -1000,27 +987,21 @@ class QStackedWidget(QWidget):
 
     currentChanged = Signal(int)
 
+    currentIndex = Prop(0, notify=True, signal="currentChanged", cast=int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pages: list[QWidget] = []
-        self._current_index = 0
 
     def addWidget(self, widget: QWidget) -> int:
         self._add_child(widget)
         self._pages.append(widget)
         return len(self._pages) - 1
 
-    def setCurrentIndex(self, index: int):
-        self._current_index = index
-        self._notify("currentIndex", index)
-        self.currentChanged.emit(index)
-
-    def currentIndex(self) -> int:
-        return self._current_index
-
     def currentWidget(self):
-        if 0 <= self._current_index < len(self._pages):
-            return self._pages[self._current_index]
+        idx = self.currentIndex()
+        if 0 <= idx < len(self._pages):
+            return self._pages[idx]
         return None
 
     def count(self) -> int:
@@ -1031,7 +1012,6 @@ class QStackedWidget(QWidget):
 
     def _get_props(self) -> dict:
         props = super()._get_props()
-        props["currentIndex"] = self._current_index
         props["pageIds"] = [p._wid for p in self._pages]
         return props
 
@@ -1044,10 +1024,17 @@ class QStackedWidget(QWidget):
 # ---------------------------------------------------------------------------
 
 class QListWidgetItem:
+    """Not a QWidget (no `_wid`/state registration), but its properties still
+    follow the same declare-once shape, so `Prop` (with `notify=False`, the
+    default) generates the accessors here too instead of hand-writing them."""
+
+    text = Prop("")
+    selected = Prop(False, getter="isSelected")
+
     def __init__(self, text: str = "", parent=None):
-        self._text = text
+        self._props: dict = {name: p.default for name, p in self._declared_props.items()}
+        self._props["text"] = text
         self._icon = QIcon()
-        self._selected = False
         self._data: dict = {}
         self._flags = 0
         self._font = QFont()
@@ -1056,23 +1043,11 @@ class QListWidgetItem:
         if parent is not None:
             parent.addItem(self)
 
-    def text(self) -> str:
-        return self._text
-
-    def setText(self, text: str):
-        self._text = text
-
     def setIcon(self, icon):
         self._icon = icon
 
     def icon(self):
         return self._icon
-
-    def setSelected(self, selected: bool):
-        self._selected = selected
-
-    def isSelected(self) -> bool:
-        return self._selected
 
     def setData(self, role: int, value):
         self._data[role] = value
@@ -1093,12 +1068,15 @@ class QListWidgetItem:
         self._background = brush
 
     def to_dict(self) -> dict:
-        d = {"text": self._text}
+        d = {"text": self.text()}
         if self._icon and not self._icon.isNull():
             d["icon"] = self._icon.text()
-        if self._selected:
+        if self.isSelected():
             d["selected"] = True
         return d
+
+
+_register_props(QListWidgetItem)
 
 class QListWidget(QWidget):
     _widget_type = "QListWidget"
@@ -1107,10 +1085,11 @@ class QListWidget(QWidget):
     itemClicked = Signal(object)
     itemDoubleClicked = Signal(object)
 
+    currentRow = Prop(-1, notify=True, signal="currentRowChanged", cast=int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: list[QListWidgetItem] = []
-        self._current_row = -1
 
     def addItem(self, item):
         if isinstance(item, str):
@@ -1134,7 +1113,7 @@ class QListWidget(QWidget):
 
     def clear(self):
         self._items.clear()
-        self._current_row = -1
+        self.setCurrentRow(-1)
         self._notify("items", [])
 
     def count(self) -> int:
@@ -1143,15 +1122,8 @@ class QListWidget(QWidget):
     def item(self, row: int):
         return self._items[row] if 0 <= row < len(self._items) else None
 
-    def currentRow(self) -> int:
-        return self._current_row
-
-    def setCurrentRow(self, row: int):
-        self._current_row = row
-        self._notify("currentRow", row)
-
     def currentItem(self):
-        return self.item(self._current_row)
+        return self.item(self.currentRow())
 
     def row(self, item):
         try:
@@ -1171,14 +1143,12 @@ class QListWidget(QWidget):
     def _get_props(self) -> dict:
         props = super()._get_props()
         props["items"] = [i.to_dict() for i in self._items]
-        props["currentRow"] = self._current_row
         return props
 
     def _handle_event(self, event_type, value):
         if event_type == "currentRowChanged":
             row = int(value)
-            self._current_row = row
-            self.currentRowChanged.emit(row)
+            self.setCurrentRow(row)
             if 0 <= row < len(self._items):
                 self.itemClicked.emit(self._items[row])
 

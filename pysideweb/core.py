@@ -265,79 +265,44 @@ class _Key(IntEnum):
     Key_Z = 0x5a
 
 class Qt:
-    """Namespace mirroring PySide6.QtCore.Qt."""
-    # Alignment
-    AlignLeft = _AlignmentFlag.AlignLeft
-    AlignRight = _AlignmentFlag.AlignRight
-    AlignHCenter = _AlignmentFlag.AlignHCenter
-    AlignTop = _AlignmentFlag.AlignTop
-    AlignBottom = _AlignmentFlag.AlignBottom
-    AlignVCenter = _AlignmentFlag.AlignVCenter
-    AlignCenter = _AlignmentFlag.AlignCenter
+    """Namespace mirroring PySide6.QtCore.Qt.
 
-    # Orientation
-    Horizontal = _Orientation.Horizontal
-    Vertical = _Orientation.Vertical
+    Every member of the enums above is exposed here under its own name
+    (e.g. `_AlignmentFlag.AlignLeft` -> `Qt.AlignLeft`). Rather than
+    hand-copying each one, `_export_enum` reflects over each enum class's
+    members and assigns them directly on `Qt` — the two-line loop below
+    replaces what used to be ~65 lines of `Foo = _FooEnum.Foo` repetition,
+    and any member added to an enum class is picked up automatically.
+    """
 
-    # Check state
-    Unchecked = _CheckState.Unchecked
-    PartiallyChecked = _CheckState.PartiallyChecked
-    Checked = _CheckState.Checked
-
-    # Item flags
-    ItemIsSelectable = _ItemFlag.ItemIsSelectable
-    ItemIsEditable = _ItemFlag.ItemIsEditable
-    ItemIsEnabled = _ItemFlag.ItemIsEnabled
-    ItemIsUserCheckable = _ItemFlag.ItemIsUserCheckable
-
-    # Scroll bar
-    ScrollBarAsNeeded = _ScrollBarPolicy.ScrollBarAsNeeded
-    ScrollBarAlwaysOff = _ScrollBarPolicy.ScrollBarAlwaysOff
-    ScrollBarAlwaysOn = _ScrollBarPolicy.ScrollBarAlwaysOn
-
-    # Sort
-    AscendingOrder = _SortOrder.AscendingOrder
-    DescendingOrder = _SortOrder.DescendingOrder
-
-    # Window
-    Window = _WindowType.Window
-    Dialog = _WindowType.Dialog
-    Popup = _WindowType.Popup
-    FramelessWindowHint = _WindowType.FramelessWindowHint
-    Widget = _WindowType.Widget
-
-    # Size policy
-    class SizePolicy:
-        Fixed = _SizePolicy.Fixed
-        Minimum = _SizePolicy.Minimum
-        Maximum = _SizePolicy.Maximum
-        Preferred = _SizePolicy.Preferred
-        Expanding = _SizePolicy.Expanding
-        MinimumExpanding = _SizePolicy.MinimumExpanding
-        Ignored = _SizePolicy.Ignored
-
-    # Tool button style
-    ToolButtonIconOnly = _ToolButtonStyle.ToolButtonIconOnly
-    ToolButtonTextOnly = _ToolButtonStyle.ToolButtonTextOnly
-    ToolButtonTextBesideIcon = _ToolButtonStyle.ToolButtonTextBesideIcon
-    ToolButtonTextUnderIcon = _ToolButtonStyle.ToolButtonTextUnderIcon
-
-    # Cursors
-    ArrowCursor = _CursorShape.ArrowCursor
-    PointingHandCursor = _CursorShape.PointingHandCursor
-    WaitCursor = _CursorShape.WaitCursor
-
-    # Keys
-    Key_Return = _Key.Key_Return
-    Key_Enter = _Key.Key_Enter
-    Key_Escape = _Key.Key_Escape
-    Key_Tab = _Key.Key_Tab
-    Key_Space = _Key.Key_Space
-
-    # Text interaction
+    # Text interaction (not backed by one of the enums above)
     TextSelectableByMouse = 1
     LinksAccessibleByMouse = 2
     TextBrowserInteraction = 3
+
+    class SizePolicy:
+        pass
+
+
+def _export_enum(namespace: type, enum_cls: type) -> None:
+    """Copy every member of `enum_cls` onto `namespace` under its own name.
+
+    Uses `__members__` rather than iterating `enum_cls` directly: plain
+    iteration of an IntFlag only yields its canonical (single-bit) members,
+    silently dropping composite aliases like `AlignCenter = AlignHCenter |
+    AlignVCenter`. `__members__` includes those aliases too.
+    """
+    for member_name, member in enum_cls.__members__.items():
+        setattr(namespace, member_name, member)
+
+
+for _enum_cls in (
+    _AlignmentFlag, _Orientation, _CheckState, _ItemFlag, _ScrollBarPolicy,
+    _SortOrder, _WindowType, _ToolButtonStyle, _CursorShape, _Key,
+):
+    _export_enum(Qt, _enum_cls)
+_export_enum(Qt.SizePolicy, _SizePolicy)
+del _enum_cls
 
 # ---------------------------------------------------------------------------
 # Value Types

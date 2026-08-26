@@ -15,39 +15,26 @@ from typing import Any
 from . import core, layouts, widgets
 
 
+def _public_classes(module: types.ModuleType) -> dict[str, type]:
+    """Every `Q*`-named class *defined in* `module` (not merely imported into it).
+
+    Adding a new widget or layout class to `widgets.py`/`layouts.py` is then
+    enough on its own to expose it through the fake `PySide6` package — this
+    reflects over the module's own namespace instead of hand-maintaining a
+    name list here that has to be kept in sync by hand on every addition.
+    """
+    return {
+        name: obj for name, obj in vars(module).items()
+        if isinstance(obj, type) and obj.__module__ == module.__name__ and name.startswith("Q")
+    }
+
+
 def _build_qtwidgets_namespace() -> dict[str, Any]:
     """Build the namespace for the fake PySide6.QtWidgets module."""
     ns: dict[str, Any] = {}
-
-    # Widgets
-    widget_classes = [
-        'QWidget', 'QMainWindow', 'QFrame', 'QPushButton', 'QLabel',
-        'QLineEdit', 'QTextEdit', 'QComboBox', 'QCheckBox', 'QRadioButton',
-        'QSlider', 'QProgressBar', 'QSpinBox', 'QDoubleSpinBox',
-        'QTabWidget', 'QGroupBox', 'QScrollArea', 'QStackedWidget',
-        'QListWidget', 'QListWidgetItem', 'QSplitter',
-        'QMenuBar', 'QMenu', 'QAction', 'QToolBar', 'QStatusBar',
-        'QDialog', 'QMessageBox', 'QButtonGroup',
-        'QSizePolicy', 'QSpacerItem', 'QWidgetItem',
-    ]
-    for name in widget_classes:
-        cls = getattr(widgets, name, None)
-        if cls is not None:
-            ns[name] = cls
-
-    # Layouts
-    layout_classes = [
-        'QVBoxLayout', 'QHBoxLayout', 'QGridLayout', 'QFormLayout',
-        'QStackedLayout', 'QLayout',
-    ]
-    for name in layout_classes:
-        cls = getattr(layouts, name, None)
-        if cls is not None:
-            ns[name] = cls
-
-    # QApplication
+    ns.update(_public_classes(widgets))
+    ns.update(_public_classes(layouts))
     ns['QApplication'] = core.QApplication
-
     return ns
 
 
