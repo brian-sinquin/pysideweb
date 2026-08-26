@@ -17,7 +17,13 @@ All notable changes to this project are documented here. The format is based on
   is the underlying permissive object; `interceptor.py`'s per-module `__getattr__` (plus a
   `sys.meta_path` finder for bare `import PySide6.<Something>`) is the entry point.
   pysideweb's own internal duck typing (`hasattr(widget, "_children")` and similar) is
-  unaffected -- only public, non-underscore-prefixed names are absorbed.
+  unaffected -- only public, non-underscore-prefixed names are absorbed. Placeholder
+  classes are built with `core._AutoAttrMeta`, so class-level constants referenced without
+  an instance (`QGraphicsView.ScrollHandDrag`, `QAbstractItemView.SelectRows`, ...) are
+  absorbed too, not just instance attribute access.
+- Example: `examples/third_party_widget.py`, a stand-in for a third-party PySide6 library
+  (subclasses `QGraphicsView`, imports from the unstubbed `PySide6.QtCharts`) that
+  demonstrates the universal fallback end to end.
 
 ### Security
 - Renderer: `QLabel`/`QPushButton` text containing `<...>` was rendered via `innerHTML`

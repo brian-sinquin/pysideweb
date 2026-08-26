@@ -124,7 +124,23 @@ class BoundSignal:
 # placeholder instead of a real AttributeError would corrupt that internal
 # bookkeeping. Only public, Qt-API-looking names are absorbed.
 
-class _AutoAttr:
+class _AutoAttrMeta(type):
+    """Metaclass for placeholder classes: makes CLASS-level attribute access
+    (``UnknownClass.SomeEnumMember``, looked up without an instance) permissive
+    too, the same way `_AutoAttr` makes instance-level access permissive. Qt
+    code constantly reaches for enum/flag constants this way (e.g.
+    `QGraphicsView.ScrollHandDrag`, `QAbstractItemView.SelectRows`) -- without
+    this, an unimplemented class would raise `AttributeError` the moment
+    something touched one of its "class constants", even though every other
+    kind of unsupported use of it degrades gracefully."""
+
+    def __getattr__(cls, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return _AutoAttr()
+
+
+class _AutoAttr(metaclass=_AutoAttrMeta):
     """Silently absorbs attribute access and calls for Qt API pysideweb
     doesn't implement, so unrecognized methods/classes degrade to a no-op
     instead of crashing the app. See the module comment above."""

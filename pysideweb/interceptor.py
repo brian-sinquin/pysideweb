@@ -313,10 +313,12 @@ def _unknown_widget_class(name: str) -> type:
     """A QtWidgets class pysideweb hasn't implemented: made a real QWidget
     subclass so it can still be added to a layout and shown -- it renders
     as an empty placeholder box, and any Qt method called on it is absorbed
-    by QWidget's own __getattr__ fallback (see widgets.py)."""
+    by QWidget's own __getattr__ fallback (see widgets.py). Built with
+    core._AutoAttrMeta so class-level constants (`QGraphicsView.ScrollHandDrag`
+    and the like, referenced without an instance) are absorbed too."""
     if name not in _unknown_widget_classes:
         _warn_once(name, "renders as an empty box and absorbs any Qt calls made on it")
-        _unknown_widget_classes[name] = type(
+        _unknown_widget_classes[name] = core._AutoAttrMeta(
             name, (widgets.QWidget,),
             {"_widget_type": name, "__init__": _unknown_widget_init},
         )

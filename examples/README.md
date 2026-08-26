@@ -15,6 +15,7 @@ uv run python examples/<name>.py
 |------|-------------|
 | [preferences.py](preferences.py) | An application settings screen. Grouped sections of labelled controls (line edits, dropdowns, checkboxes, a slider) with a Save / Reset action bar. |
 | [contacts.py](contacts.py) | A master–detail record manager. A contact list on the left, an editable detail form on the right; select, edit, add, and delete records. |
+| [third_party_widget.py](third_party_widget.py) | A stand-in for a third-party PySide6 library (think pyqtgraph): subclasses `QGraphicsView` and imports from `PySide6.QtCharts`, neither implemented by pysideweb. Demonstrates the universal fallback — nothing crashes, the widget just renders as a labeled placeholder. |
 
 ## Writing your own
 
