@@ -114,6 +114,23 @@ def add_change_listener(listener: Callable):
 # Tree serialization
 # ---------------------------------------------------------------------------
 
+def _append_layout_children(layout, out: list[dict]) -> None:
+    """Serialize a layout's items (widgets, nested layouts, direct widgets/spacers) into `out`.
+
+    Shared by `serialize_widget` and `_serialize_layout_as_container` — both used to
+    walk `layout._items` by hand with the same three-way branch.
+    """
+    for item in layout._items:
+        if getattr(item, '_widget', None) is not None:
+            out.append(serialize_widget(item._widget))
+        elif getattr(item, '_layout', None) is not None:
+            # Nested layout (e.g. addLayout inside addLayout)
+            out.append(_serialize_layout_as_container(item._layout))
+        elif getattr(item, '_wid', None) is not None:
+            # Direct widget or stretch spacer
+            out.append(serialize_widget(item))
+
+
 def serialize_widget(widget) -> dict:
     """Serialize a single widget and all its children to a JSON-compatible dict."""
     data = {
@@ -124,23 +141,18 @@ def serialize_widget(widget) -> dict:
     }
 
     # Serialize layout children
-    if hasattr(widget, '_layout') and widget._layout is not None:
+    if getattr(widget, '_layout', None) is not None:
         layout = widget._layout
         data["layout"] = layout._get_props()
-        for item in layout._items:
-            if hasattr(item, '_widget') and item._widget is not None:
-                data["children"].append(serialize_widget(item._widget))
-            elif hasattr(item, '_layout') and item._layout is not None:
-                # Nested layout
-                data["children"].append(_serialize_layout_as_container(item._layout))
-            elif getattr(item, '_wid', None) is not None:
-                # Direct widget or stretch spacer
-                data["children"].append(serialize_widget(item))
+        _append_layout_children(layout, data["children"])
 
-    # Serialize direct children (added via setParent or addWidget)
+    # Serialize direct children (added via setParent or addWidget), skipping any
+    # already pulled in through the layout above.
     if hasattr(widget, '_children'):
+        seen = {c["id"] for c in data["children"]}
         for child in widget._children:
-            if child._wid not in [c.get("id") for c in data["children"]]:
+            if child._wid not in seen:
+                seen.add(child._wid)
                 data["children"].append(serialize_widget(child))
 
     return data
@@ -155,14 +167,7 @@ def _serialize_layout_as_container(layout) -> dict:
         "layout": layout._get_props(),
         "children": [],
     }
-    for item in layout._items:
-        if hasattr(item, '_widget') and item._widget is not None:
-            data["children"].append(serialize_widget(item._widget))
-        elif hasattr(item, '_layout') and item._layout is not None:
-            # Nested layout (e.g. addLayout inside addLayout)
-            data["children"].append(_serialize_layout_as_container(item._layout))
-        elif getattr(item, '_wid', None) is not None:
-            data["children"].append(serialize_widget(item))
+    _append_layout_children(layout, data["children"])
     return data
 
 

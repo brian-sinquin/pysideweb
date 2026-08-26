@@ -222,6 +222,17 @@ class QWidget:
     def children(self):
         return list(self._children)
 
+    def _add_child(self, widget: QWidget):
+        """Reparent `widget` under self and register it as a child, once.
+
+        Shared by every container-ish addWidget()/setWidget()/addTab() —
+        previously each repeated the same "set parent, append if absent"
+        trio by hand.
+        """
+        widget._parent = self
+        if widget not in self._children:
+            self._children.append(widget)
+
     def findChild(self, type_=None, name: str = ""):
         for child in self._children:
             if name and child.objectName() == name:
@@ -304,9 +315,7 @@ class QMainWindow(QWidget):
 
     def setCentralWidget(self, widget: QWidget):
         self._central_widget = widget
-        widget._parent = self
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
         state.notify_full_refresh()
 
     def centralWidget(self):
@@ -863,9 +872,7 @@ class QTabWidget(QWidget):
             icon = args[0]
             text = args[1]
         tab = {"text": text, "icon": icon, "widget": widget}
-        widget._parent = self
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
         self._tabs.append(tab)
         state.notify_full_refresh()
         return len(self._tabs) - 1
@@ -963,9 +970,7 @@ class QScrollArea(QWidget):
 
     def setWidget(self, widget: QWidget):
         self._widget_inside = widget
-        widget._parent = self
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
 
     def widget(self):
         return self._widget_inside
@@ -1001,10 +1006,8 @@ class QStackedWidget(QWidget):
         self._current_index = 0
 
     def addWidget(self, widget: QWidget) -> int:
-        widget._parent = self
+        self._add_child(widget)
         self._pages.append(widget)
-        if widget not in self._children:
-            self._children.append(widget)
         return len(self._pages) - 1
 
     def setCurrentIndex(self, index: int):
@@ -1196,10 +1199,8 @@ class QSplitter(QWidget):
         self._sizes: list[int] = []
 
     def addWidget(self, widget: QWidget):
-        widget._parent = self
+        self._add_child(widget)
         self._widgets.append(widget)
-        if widget not in self._children:
-            self._children.append(widget)
 
     def setSizes(self, sizes: list[int]):
         self._sizes = sizes
@@ -1316,8 +1317,7 @@ class QToolBar(QWidget):
         pass
 
     def addWidget(self, widget):
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
 
     def setMovable(self, movable: bool):
         pass
@@ -1337,8 +1337,7 @@ class QStatusBar(QWidget):
         self.setMessage("")
 
     def addWidget(self, widget, stretch: int = 0):
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
 
     def addPermanentWidget(self, widget, stretch: int = 0):
         self.addWidget(widget, stretch)

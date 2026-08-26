@@ -66,8 +66,14 @@ class QLayout:
         if parent is not None and hasattr(parent, '_layout'):
             parent._layout = self
 
-    def addWidget(self, widget, *args, **kwargs):
-        raise NotImplementedError
+    def addWidget(self, widget, stretch: int = 0, alignment: int = 0):
+        """Default box-style add: append a plain item. QVBoxLayout/QHBoxLayout use
+        this as-is; QGridLayout/QFormLayout/QStackedLayout override it for their
+        own item shapes."""
+        item = _LayoutItem(widget=widget, stretch=stretch, alignment=alignment)
+        self._items.append(item)
+        if hasattr(widget, '_parent_layout'):
+            widget._parent_layout = self
 
     def setSpacing(self, spacing: int):
         self._spacing = spacing
@@ -125,12 +131,6 @@ class QVBoxLayout(QLayout):
         super().__init__(parent)
         self._layout_type = "QVBoxLayout"
 
-    def addWidget(self, widget, stretch: int = 0, alignment: int = 0):
-        item = _LayoutItem(widget=widget, stretch=stretch, alignment=alignment)
-        self._items.append(item)
-        if hasattr(widget, '_parent_layout'):
-            widget._parent_layout = self
-
 
 # ---------------------------------------------------------------------------
 # QHBoxLayout
@@ -140,12 +140,6 @@ class QHBoxLayout(QLayout):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._layout_type = "QHBoxLayout"
-
-    def addWidget(self, widget, stretch: int = 0, alignment: int = 0):
-        item = _LayoutItem(widget=widget, stretch=stretch, alignment=alignment)
-        self._items.append(item)
-        if hasattr(widget, '_parent_layout'):
-            widget._parent_layout = self
 
 
 # ---------------------------------------------------------------------------

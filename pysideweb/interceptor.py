@@ -295,40 +295,25 @@ def install():
     Patch sys.modules so that `from PySide6.QtWidgets import ...` etc.
     returns our virtual classes.
     """
-    # Create the fake PySide6 parent module
-    pyside6 = types.ModuleType("PySide6")
-    pyside6.__package__ = "PySide6"
-    pyside6.__path__ = []
-    pyside6.__file__ = "<pysideweb:PySide6>"
-    pyside6.__version__ = "6.99.0-pysideweb"
+    # Create the fake PySide6 parent module, then its real sub-modules
+    pyside6 = _make_module("PySide6", {"__version__": "6.99.0-pysideweb"})
+    submodules = {
+        "QtWidgets": _build_qtwidgets_namespace(),
+        "QtCore": _build_qtcore_namespace(),
+        "QtGui": _build_qtgui_namespace(),
+        # Common sub-module imports we don't implement — empty stubs are enough
+        # for `import PySide6.QtNetwork` etc. to succeed.
+        **{name: {} for name in [
+            "QtNetwork", "QtSvg", "QtSvgWidgets", "QtOpenGL",
+            "QtMultimedia", "QtPrintSupport", "QtWebEngine",
+            "QtWebEngineWidgets",
+        ]},
+    }
+    for name, namespace in submodules.items():
+        mod = _make_module(f"PySide6.{name}", namespace)
+        setattr(pyside6, name, mod)
+        sys.modules[f"PySide6.{name}"] = mod
 
-    # Build sub-modules
-    qtwidgets = _make_module("PySide6.QtWidgets", _build_qtwidgets_namespace())
-    qtcore = _make_module("PySide6.QtCore", _build_qtcore_namespace())
-    qtgui = _make_module("PySide6.QtGui", _build_qtgui_namespace())
-
-    # Attach to parent
-    pyside6.QtWidgets = qtwidgets
-    pyside6.QtCore = qtcore
-    pyside6.QtGui = qtgui
-
-    # Inject into sys.modules
     sys.modules["PySide6"] = pyside6
-    sys.modules["PySide6.QtWidgets"] = qtwidgets
-    sys.modules["PySide6.QtCore"] = qtcore
-    sys.modules["PySide6.QtGui"] = qtgui
-
-    # Also handle common sub-module imports
-    # PySide6.QtNetwork, PySide6.QtSvg, etc. — provide empty stubs
-    for submod_name in ["QtNetwork", "QtSvg", "QtSvgWidgets", "QtOpenGL",
-                        "QtMultimedia", "QtPrintSupport", "QtWebEngine",
-                        "QtWebEngineWidgets"]:
-        full_name = f"PySide6.{submod_name}"
-        stub = types.ModuleType(full_name)
-        stub.__package__ = "PySide6"
-        stub.__path__ = []
-        stub.__file__ = f"<pysideweb:{full_name}>"
-        setattr(pyside6, submod_name, stub)
-        sys.modules[full_name] = stub
 
     print("[PySideWeb] PySide6 imports intercepted -- UI will render in your browser")
