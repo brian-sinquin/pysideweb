@@ -47,10 +47,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install real PySide6 + pytest
-        run: uv pip install --system pyside6 pytest
+      - name: Install real PySide6 + pytest in an isolated venv
+        run: |
+          uv venv .venv-qt
+          uv pip install --python .venv-qt pyside6 pytest
 
       - name: Cross-check pysideweb's reference values against genuine Qt
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q tests_qt/
+        run: .venv-qt/bin/python -m pytest -q tests_qt/
