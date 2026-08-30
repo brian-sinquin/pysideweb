@@ -317,7 +317,9 @@
             const known = Object.prototype.hasOwnProperty.call(RENDERERS, node.type);
             el = (known ? RENDERERS[node.type] : renderGenericWidget)(node);
             el.dataset.wid = node.id;
-            if (!known) {
+            // A custom-painted QWidget subclass isn't in RENDERERS but is NOT
+            // unsupported — it draws itself on a <canvas> (see applyPaint).
+            if (!known && !(node.props && node.props.paint)) {
                 el.classList.add("widget-unsupported");
                 el.title = `${node.type}: not implemented by pysideweb`;
             }
@@ -355,6 +357,9 @@
 
         // Update widget-specific properties that could have changed
         updateWidgetSpecific(el, node);
+
+        // Custom paintEvent output → <canvas>
+        applyPaint(el, node);
 
         // Reconcile children
         reconcileChildrenForNode(el, node);
@@ -944,7 +949,7 @@
         // as an empty box via renderGenericWidget -- but is marked so it's
         // visually distinguishable from an intentionally empty QWidget
         // rather than looking like a bug.
-        if (!known) {
+        if (!known && !(node.props && node.props.paint)) {
             el.classList.add("widget-unsupported");
             el.title = `${node.type}: not implemented by pysideweb`;
         }
@@ -972,6 +977,8 @@
         if (node.props.tooltip) {
             el.title = node.props.tooltip;
         }
+
+        applyPaint(el, node);
 
         return el;
     }
@@ -1693,6 +1700,290 @@
         if (alignment & 0x0080) el.style.alignSelf = "center";
         else if (alignment & 0x0040) el.style.alignSelf = "flex-end";
         else if (alignment & 0x0020) el.style.alignSelf = "flex-start";
+    }
+
+    // ── Virtual painting: replay QPainter commands onto <canvas> ───
+    //
+    // A QWidget subclass that overrides paintEvent arrives with
+    // node.props.paint = { commands: [...], w, h }. pysideweb/painting.py
+    // records each QPainter call as one command; here we replay them onto a
+    // 2D canvas context sized to the widget.
+
+    const DASH_PATTERNS = {
+        solid: [],
+        none: [],
+        dash: [6, 3],
+        dot: [1, 3],
+        dashdot: [6, 3, 1, 3],
+        dashdotdot: [6, 3, 1, 3, 1, 3],
+    };
+
+    function penStroke(ctx, pen) {
+        if (!pen || !pen.color || pen.style === "none") return false;
+        ctx.strokeStyle = pen.color;
+        ctx.lineWidth = pen.width || 1;
+        ctx.lineCap = pen.cap || "butt";
+        ctx.lineJoin = pen.join || "miter";
+        ctx.setLineDash((DASH_PATTERNS[pen.style] || []).map(v => v * (pen.width || 1)));
+        return true;
+    }
+
+    function brushFill(ctx, brush) {
+        if (!brush) return false;
+        if (brush.gradient) {
+            ctx.fillStyle = makeGradient(ctx, brush.gradient);
+            return true;
+        }
+        if (!brush.color) return false;
+        ctx.fillStyle = brush.color;
+        return true;
+    }
+
+    function makeGradient(ctx, g) {
+        let grad;
+        if (g.type === "radial") {
+            grad = ctx.createRadialGradient(g.fx, g.fy, 0, g.cx, g.cy, g.r || 1);
+        } else {
+            grad = ctx.createLinearGradient(g.x1, g.y1, g.x2, g.y2);
+        }
+        for (const [pos, color] of g.stops || []) {
+            if (color) grad.addColorStop(Math.max(0, Math.min(1, pos)), color);
+        }
+        return grad;
+    }
+
+    function fontString(css) {
+        if (!css) return "12px sans-serif";
+        const parts = [];
+        if (css.fontStyle) parts.push(css.fontStyle);
+        if (css.fontWeight) parts.push(css.fontWeight);
+        parts.push(css.fontSize || "12px");
+        parts.push(css.fontFamily || "sans-serif");
+        return parts.join(" ");
+    }
+
+    function replayPaint(ctx, commands) {
+        let pen = { color: "#000", width: 1, style: "solid", cap: "butt", join: "miter" };
+        let brush = { color: null, gradient: null };
+        let font = null;
+
+        const pathRect = (x, y, w, h) => { ctx.beginPath(); ctx.rect(x, y, w, h); };
+        const paintPath = (doFill, doStroke, overrideBrush, overridePen) => {
+            if (doFill && brushFill(ctx, overrideBrush || brush)) ctx.fill();
+            if (doStroke && penStroke(ctx, overridePen || pen)) ctx.stroke();
+        };
+
+        for (const c of commands) {
+            switch (c.op) {
+                case "pen":
+                    pen = c; break;
+                case "brush":
+                    brush = c; break;
+                case "font":
+                    font = c.css; ctx.font = fontString(font); break;
+                case "opacity":
+                    ctx.globalAlpha = c.value; break;
+                case "composite":
+                    break;
+                case "save":
+                    ctx.save(); break;
+                case "restore":
+                    ctx.restore(); break;
+                case "translate":
+                    ctx.translate(c.x, c.y); break;
+                case "rotate":
+                    ctx.rotate(c.deg * Math.PI / 180); break;
+                case "scale":
+                    ctx.scale(c.x, c.y); break;
+                case "shear":
+                    ctx.transform(1, c.y, c.x, 1, 0, 0); break;
+                case "resetTransform":
+                    ctx.setTransform(paintDpr, 0, 0, paintDpr, 0, 0); break;
+                case "clipRect":
+                    ctx.beginPath(); ctx.rect(c.x, c.y, c.w, c.h); ctx.clip(); break;
+                case "resetClip":
+                    break;
+                case "drawLine":
+                    ctx.beginPath(); ctx.moveTo(c.x1, c.y1); ctx.lineTo(c.x2, c.y2);
+                    if (penStroke(ctx, pen)) ctx.stroke();
+                    break;
+                case "drawRect":
+                    pathRect(c.x, c.y, c.w, c.h); paintPath(true, true); break;
+                case "drawRoundedRect":
+                    roundRectPath(ctx, c.x, c.y, c.w, c.h, c.rx, c.ry);
+                    paintPath(true, true); break;
+                case "fillRect":
+                    pathRect(c.x, c.y, c.w, c.h);
+                    if (c.brush) { if (brushFill(ctx, c.brush)) ctx.fill(); }
+                    else if (c.color) { ctx.fillStyle = c.color; ctx.fill(); }
+                    else if (brushFill(ctx, brush)) ctx.fill();
+                    break;
+                case "clearRect":
+                    ctx.clearRect(c.x, c.y, c.w, c.h); break;
+                case "drawEllipse":
+                    ctx.beginPath();
+                    ctx.ellipse(c.x + c.w / 2, c.y + c.h / 2, Math.abs(c.w / 2),
+                        Math.abs(c.h / 2), 0, 0, Math.PI * 2);
+                    paintPath(true, true); break;
+                case "drawArc":
+                    ctx.beginPath();
+                    ctx.ellipse(c.cx, c.cy, Math.abs(c.rx), Math.abs(c.ry), 0,
+                        c.start, c.end, c.anticlockwise);
+                    if (penStroke(ctx, pen)) ctx.stroke();
+                    break;
+                case "drawPie":
+                    ctx.beginPath(); ctx.moveTo(c.cx, c.cy);
+                    ctx.ellipse(c.cx, c.cy, Math.abs(c.rx), Math.abs(c.ry), 0,
+                        c.start, c.end, c.anticlockwise);
+                    ctx.closePath(); paintPath(true, true); break;
+                case "drawChord":
+                    ctx.beginPath();
+                    ctx.ellipse(c.cx, c.cy, Math.abs(c.rx), Math.abs(c.ry), 0,
+                        c.start, c.end, c.anticlockwise);
+                    ctx.closePath(); paintPath(true, true); break;
+                case "drawPoint":
+                    ctx.beginPath();
+                    ctx.arc(c.x, c.y, (pen.width || 1) / 2, 0, Math.PI * 2);
+                    if (pen.color) { ctx.fillStyle = pen.color; ctx.fill(); }
+                    break;
+                case "drawPolyline":
+                    polyPath(ctx, c.pts, false);
+                    if (penStroke(ctx, pen)) ctx.stroke();
+                    break;
+                case "drawPolygon":
+                    polyPath(ctx, c.pts, true); paintPath(true, true); break;
+                case "drawPath":
+                    buildPath(ctx, c.segments);
+                    paintPath(c.fill, c.stroke, c.brush, c.pen); break;
+                case "drawText":
+                    if (pen.color) ctx.fillStyle = pen.color;
+                    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+                    ctx.fillText(c.text, c.x, c.y);
+                    break;
+                case "drawTextRect":
+                    drawTextInRect(ctx, c, pen);
+                    break;
+                case "drawImage":
+                case "drawPixmap":
+                    drawImageCmd(ctx, c);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    function roundRectPath(ctx, x, y, w, h, rx, ry) {
+        rx = Math.min(rx || 0, w / 2); ry = Math.min(ry || rx || 0, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rx, y);
+        ctx.lineTo(x + w - rx, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + ry);
+        ctx.lineTo(x + w, y + h - ry);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - rx, y + h);
+        ctx.lineTo(x + rx, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - ry);
+        ctx.lineTo(x, y + ry);
+        ctx.quadraticCurveTo(x, y, x + rx, y);
+        ctx.closePath();
+    }
+
+    function polyPath(ctx, pts, close) {
+        ctx.beginPath();
+        pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+        if (close) ctx.closePath();
+    }
+
+    function buildPath(ctx, segments) {
+        ctx.beginPath();
+        for (const s of segments) {
+            switch (s[0]) {
+                case "M": ctx.moveTo(s[1], s[2]); break;
+                case "L": ctx.lineTo(s[1], s[2]); break;
+                case "C": ctx.bezierCurveTo(s[1], s[2], s[3], s[4], s[5], s[6]); break;
+                case "Q": ctx.quadraticCurveTo(s[1], s[2], s[3], s[4]); break;
+                case "E": ctx.ellipse(s[1] + s[3] / 2, s[2] + s[4] / 2,
+                    Math.abs(s[3] / 2), Math.abs(s[4] / 2), 0, 0, Math.PI * 2); break;
+                case "Z": ctx.closePath(); break;
+                default: break;
+            }
+        }
+    }
+
+    function drawTextInRect(ctx, c, pen) {
+        const f = c.flags || 0;
+        if (pen.color) ctx.fillStyle = pen.color;
+        let tx = c.x, ty = c.y;
+        if (f & 0x0004) { ctx.textAlign = "center"; tx = c.x + c.w / 2; }
+        else if (f & 0x0002) { ctx.textAlign = "right"; tx = c.x + c.w; }
+        else { ctx.textAlign = "left"; tx = c.x; }
+        if (f & 0x0080) { ctx.textBaseline = "middle"; ty = c.y + c.h / 2; }
+        else if (f & 0x0040) { ctx.textBaseline = "bottom"; ty = c.y + c.h; }
+        else { ctx.textBaseline = "top"; ty = c.y; }
+        ctx.fillText(c.text, tx, ty);
+    }
+
+    const _imgCache = {};
+    function drawImageCmd(ctx, c) {
+        if (!c.src) return;
+        let img = _imgCache[c.src];
+        if (!img) {
+            img = new Image();
+            img.src = c.src;
+            _imgCache[c.src] = img;
+            img.onload = () => scheduleRepaintAll();
+        }
+        if (img.complete && img.naturalWidth) {
+            if (c.w && c.h) ctx.drawImage(img, c.x, c.y, c.w, c.h);
+            else ctx.drawImage(img, c.x, c.y);
+        }
+    }
+
+    let paintDpr = 1;
+    const _paintedEls = new Set();
+
+    function scheduleRepaintAll() {
+        // An async image finished decoding — re-run every canvas we know about.
+        for (const el of _paintedEls) {
+            if (!el.isConnected) { _paintedEls.delete(el); continue; }
+            if (el.__paintNode) applyPaint(el, el.__paintNode);
+        }
+    }
+
+    function applyPaint(el, node) {
+        const paint = node.props && node.props.paint;
+        if (!paint) {
+            const stale = el.querySelector(":scope > canvas.pysideweb-canvas");
+            if (stale) stale.remove();
+            return;
+        }
+
+        let canvas = el.querySelector(":scope > canvas.pysideweb-canvas");
+        if (!canvas) {
+            canvas = document.createElement("canvas");
+            canvas.className = "pysideweb-canvas";
+            el.insertBefore(canvas, el.firstChild);
+        }
+
+        paintDpr = window.devicePixelRatio || 1;
+        const w = Math.max(1, paint.w || el.clientWidth || 300);
+        const h = Math.max(1, paint.h || el.clientHeight || 150);
+        canvas.width = w * paintDpr;
+        canvas.height = h * paintDpr;
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(paintDpr, 0, 0, paintDpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        try {
+            replayPaint(ctx, paint.commands || []);
+        } catch (e) {
+            console.warn("[pysideweb] paint replay error", e);
+        }
+
+        el.__paintNode = node;
+        _paintedEls.add(el);
     }
 
     // ── Initialize ─────────────────────────────────────────────

@@ -14,7 +14,7 @@ import sys
 import types
 from typing import Any
 
-from . import core, layouts, widgets
+from . import core, layouts, painting, widgets
 
 
 def _public_classes(module: types.ModuleType) -> dict[str, type]:
@@ -155,8 +155,25 @@ def _build_qtgui_namespace() -> dict[str, Any]:
     ns['QColor'] = core.QColor
     ns['QFont'] = core.QFont
     ns['QIcon'] = core.QIcon
-    ns['QPixmap'] = core.QPixmap
     ns['QAction'] = widgets.QAction  # Qt6 moved QAction to QtGui
+
+    # Real virtual-painting pipeline (pysideweb/painting.py): a QPainter that
+    # records drawing calls for replay on an HTML5 <canvas>, plus its
+    # supporting value types.
+    ns['QPainter'] = painting.QPainter
+    ns['QPen'] = painting.QPen
+    ns['QBrush'] = painting.QBrush
+    ns['QPainterPath'] = painting.QPainterPath
+    ns['QPolygon'] = painting.QPolygon
+    ns['QPolygonF'] = painting.QPolygonF
+    ns['QLinearGradient'] = painting.QLinearGradient
+    ns['QRadialGradient'] = painting.QRadialGradient
+    ns['QConicalGradient'] = painting.QRadialGradient
+    ns['QGradient'] = painting.QGradient
+    ns['QImage'] = painting.QImage
+    ns['QPixmap'] = painting.QPixmap
+    ns['QPaintEvent'] = painting.QPaintEvent
+    ns['QPaintDevice'] = painting.QPaintDevice
 
     # QPalette stub
     class QPalette:
@@ -192,38 +209,6 @@ def _build_qtgui_namespace() -> dict[str, Any]:
 
     ns['QPalette'] = QPalette
 
-    # QBrush stub
-    class QBrush:
-        def __init__(self, color=None):
-            self._color = color or core.QColor()
-
-        def color(self):
-            return self._color
-
-    ns['QBrush'] = QBrush
-
-    # QPen stub
-    class QPen:
-        def __init__(self, *args):
-            pass
-
-    ns['QPen'] = QPen
-
-    # QPainter stub
-    class QPainter:
-        def __init__(self, *args):
-            pass
-
-        def begin(self, *args): pass
-        def end(self): pass
-        def setPen(self, *args): pass
-        def setBrush(self, *args): pass
-        def drawText(self, *args): pass
-        def drawRect(self, *args): pass
-        def fillRect(self, *args): pass
-
-    ns['QPainter'] = QPainter
-
     # QKeySequence
     class QKeySequence:
         def __init__(self, key: str = ""):
@@ -257,13 +242,7 @@ def _build_qtgui_namespace() -> dict[str, Any]:
             return core.QRect(0, 0, 100, 16)
 
     ns['QFontMetrics'] = QFontMetrics
-
-    # QImage stub
-    class QImage:
-        def __init__(self, *args):
-            pass
-
-    ns['QImage'] = QImage
+    ns['QFontMetricsF'] = QFontMetrics
 
     return ns
 

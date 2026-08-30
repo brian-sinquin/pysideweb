@@ -82,6 +82,15 @@ Not every Qt method is implemented; PySideWeb targets the common application sur
 Missing something? [Open an issue](https://github.com/brian-sinquin/pysideweb/issues) or see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### Custom-painted widgets
+
+A `QWidget` subclass that overrides `paintEvent` renders for real. PySideWeb's virtual
+`QPainter` records your drawing calls (`drawRect`, `drawArc`, `drawPath`, `drawText`,
+gradients, transforms, …) and replays them on an HTML5 `<canvas>` in the browser;
+`update()` / `repaint()` repaint it. Pixel *readback* (`QImage`/`QPixmap` inspection)
+still isn't possible — nothing is rasterized on the Python side. See
+[examples/custom_paint.py](examples/custom_paint.py).
+
 ### Working with third-party PySide6 libraries
 
 PySideWeb is meant to run more than apps written directly against it — including libraries
@@ -120,6 +129,8 @@ See [examples/README.md](examples/README.md) for details.
   sections of controls with a Save / Reset action bar.
 - [contacts.py](examples/contacts.py) — a master–detail record manager: a contact list
   alongside an editable detail form.
+- [custom_paint.py](examples/custom_paint.py) — a resource monitor whose gauge and
+  sparkline draw themselves with `QPainter` in `paintEvent`.
 
 ## Roadmap
 
@@ -127,6 +138,7 @@ See [examples/README.md](examples/README.md) for details.
 - QSS stylesheet translation
 - PyPI release
 - Per-session isolation for multiple simultaneous clients
+- Wider `QPainter` coverage (pixmap payloads, text metrics, composition modes)
 
 ## Contributing
 
