@@ -42,13 +42,28 @@ written directly against PySideWeb, at least run without crashing. See the READM
 
 ### `core.py`
 The QtCore surface, reimplemented in pure Python:
+- **`QObject`** — the real root of the hierarchy: object name, parent/child ownership,
+  `blockSignals`, `sender()`, `setProperty`, `findChild`. `QWidget`, `QTimer` and
+  `QAction` inherit it, so `isinstance(w, QObject)` and `class Thing(QObject)` work.
 - **`Signal` / `BoundSignal`** — a descriptor-based signal/slot system. `emit()` inspects
   each slot's signature and truncates arguments so zero-arg slots can connect to
-  value-carrying signals (matching Qt's forgiving behavior).
-- **`Qt`** — enums and flags (alignment, orientation, item flags, …).
-- **Value types** — `QSize`, `QPoint`, `QRect`, `QColor`, `QFont` (with `to_css()`), etc.
-- **`QTimer`** — backed by `threading.Timer`.
-- **`QApplication`** — `exec()` starts the web server, opens a browser, and blocks.
+  value-carrying signals; it honours `signalsBlocked()` and, under
+  `PYSIDEWEB_STRICT=1`, re-raises slot exceptions instead of printing them.
+- **`Qt`** — the enum/flag tables (full `Key`, `ItemDataRole`, `KeyboardModifier`, …),
+  with a metaclass that returns a stable placeholder for any member not shipped, so
+  `event.key() == Qt.Key_Whatever` never raises.
+- **Value types** — `QSize`/`QSizeF`, `QPoint`/`QPointF`, `QRect`/`QRectF`, `QLine`/`QLineF`
+  (operator- and method-complete), `QColor` (hex + CSS-name parsing with channel
+  readback), `QFont`, `QUrl`, `QModelIndex`, `QSettings` (JSON-file backed).
+- **`QTimer`** — one daemon thread per active timer, sleeping on an `Event` between ticks.
+- **`QApplication`** — `exec()` starts the web server, opens a browser, and blocks on a
+  quit `Event`; `quit()` unblocks it and `aboutToQuit` fires.
+
+### `qss.py`
+Translates a Qt Style Sheet (`setStyleSheet(...)` with rule blocks) into CSS scoped to
+the widget's subtree (`[data-wid="wN"] …`): pseudo-states (`:pressed` → `:active`),
+sub-controls (`::item`, `::chunk`), Qt-only properties dropped. The renderer just injects
+the result as a `<style>` element. A bare declaration list is applied inline instead.
 
 ### `widgets.py` / `layouts.py`
 Virtual widget and layout classes. Each widget has:
