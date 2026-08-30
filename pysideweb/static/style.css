@@ -895,6 +895,136 @@ body {
     font-size: var(--font-size-lg);
 }
 
+/* ── QDial ─────────────────────────────────────────────────────── */
+.qdial {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    width: 96px;
+}
+.qdial-svg {
+    width: 96px;
+    height: 96px;
+    touch-action: none;
+    cursor: pointer;
+}
+.qdial-track {
+    fill: none;
+    stroke: var(--border);
+    stroke-width: 6;
+}
+.qdial-arc {
+    stroke: var(--accent);
+    stroke-width: 6;
+    stroke-linecap: round;
+}
+.qdial-knob {
+    fill: var(--accent-hover);
+}
+.qdial-value {
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── QTableWidget ──────────────────────────────────────────────── */
+.qtablewidget {
+    overflow: auto;
+    max-height: 360px;
+    border: 1px solid var(--border);
+    border-radius: var(--border-radius);
+}
+.qtable {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: var(--font-size-md);
+}
+.qtable th,
+.qtable td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    white-space: nowrap;
+}
+.qtable thead th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+.qtable tbody th {
+    background: var(--bg-secondary);
+    color: var(--text-tertiary);
+    font-weight: 500;
+}
+.qtable td {
+    cursor: pointer;
+    color: inherit;
+}
+.qtable td:hover {
+    background: var(--bg-hover);
+}
+.qtable td.selected {
+    background: var(--accent-subtle);
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+.qtable td[contenteditable="true"]:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    background: var(--bg-elevated);
+}
+
+/* ── QTreeWidget ───────────────────────────────────────────────── */
+.qtreewidget {
+    overflow: auto;
+    max-height: 360px;
+    border: 1px solid var(--border);
+    border-radius: var(--border-radius);
+    font-size: var(--font-size-md);
+}
+.qtree-head {
+    display: flex;
+    gap: var(--space-sm);
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+}
+.qtree-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: 6px 8px;
+    cursor: default;
+    border-bottom: 1px solid var(--border);
+}
+.qtree-row:hover {
+    background: var(--bg-hover);
+}
+.qtree-row.selected {
+    background: var(--accent-subtle);
+    color: var(--accent);
+}
+.qtree-twisty {
+    width: 1em;
+    display: inline-block;
+    text-align: center;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    user-select: none;
+}
+.qtree-twisty.leaf {
+    cursor: default;
+}
+.qtree-cell {
+    cursor: pointer;
+}
+
 /* ── QSplitter ─────────────────────────────────────────────────── */
 .qsplitter {
     display: flex;

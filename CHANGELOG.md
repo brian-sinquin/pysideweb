@@ -7,6 +7,31 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Widgets: `QDial` (rotary slider, drawn as a draggable SVG dial), `QTableWidget` /
+  `QTableWidgetItem` (headers, per-cell items, `cellClicked` selection, editable cells
+  via `ItemIsEditable` → `cellChanged`), and `QTreeWidget` / `QTreeWidgetItem` (nested
+  items, per-column text, `expandAll`, expand/collapse toggles, `itemClicked` /
+  `itemExpanded`). All three ride the reflective `Prop`/serialization machinery, so
+  they're exposed through the fake `PySide6.QtWidgets` automatically.
+- QSS → CSS translation: `setStyleSheet()` now accepts real Qt Style Sheets, not only
+  a flat declaration list. Rule blocks, `:pressed` / `:hover` / `:checked` / `:disabled`
+  pseudo-states, and common sub-controls (`::item`, `::chunk`, `::tab`, …) are
+  translated to CSS scoped to the widget's subtree (`[data-wid="wN"] …`) and injected
+  as a `<style>` element, so a stylesheet neither leaks to sibling widgets nor needs
+  per-property handling in Python. Qt-only bits (`qproperty-*`, sub-controls we don't
+  model) are dropped rather than misapplied. A bare declaration list still works as
+  before. Also: `renderTree` now has a `setTimeout` fallback beside
+  `requestAnimationFrame`, so the first paint still happens in a backgrounded /
+  non-compositing tab where rAF is throttled to never.
+- `QPainter` coverage widened: `QImage` / `QPixmap` read a local file and carry it to
+  the browser as a `data:` URL (so `drawImage` / `drawPixmap` actually show it; http/
+  data URLs pass through, a missing path is kept verbatim); `setCompositionMode()` maps
+  the full `CompositionMode_*` set to canvas `globalCompositeOperation`; `QFontMetrics`
+  / `QFontMetricsF` are real now, backed by a per-character width table (approximate —
+  no font engine server-side — but far closer than a flat multiplier), with
+  `horizontalAdvance` / `boundingRect` / `elidedText` / the vertical metrics.
+- Example: `examples/data_browser.py`, a `QTreeWidget` / `QTableWidget` / `QDial`
+  layout themed with a single `setStyleSheet` call.
 - Virtual `QPainter` pipeline (`pysideweb/painting.py`): a `QWidget` subclass that
   overrides `paintEvent` now renders for real in the browser instead of as a dashed
   "unsupported" box. `QPainter` records each drawing call (`drawLine`, `drawRect`,

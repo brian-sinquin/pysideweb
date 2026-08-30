@@ -72,10 +72,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 |------------|---------|
 | Containers | `QWidget`, `QMainWindow`, `QFrame`, `QGroupBox`, `QScrollArea`, `QStackedWidget`, `QTabWidget`, `QSplitter` |
 | Buttons    | `QPushButton`, `QCheckBox`, `QRadioButton`, `QButtonGroup` |
-| Input      | `QLineEdit`, `QTextEdit`, `QComboBox`, `QSpinBox`, `QDoubleSpinBox`, `QSlider` |
-| Display    | `QLabel`, `QProgressBar`, `QListWidget` / `QListWidgetItem` |
+| Input      | `QLineEdit`, `QTextEdit`, `QComboBox`, `QSpinBox`, `QDoubleSpinBox`, `QSlider`, `QDial` |
+| Display    | `QLabel`, `QProgressBar`, `QListWidget`, `QTableWidget`, `QTreeWidget` (+ their `*Item` types) |
 | Chrome     | `QMenuBar`, `QMenu`, `QAction`, `QToolBar`, `QStatusBar` |
 | Layouts    | `QVBoxLayout`, `QHBoxLayout`, `QGridLayout`, `QFormLayout`, `QStackedLayout` |
+| Painting   | `QPainter`, `QPen`, `QBrush`, `QPainterPath`, `QPolygon`, `QLinearGradient` / `QRadialGradient`, `QImage` / `QPixmap`, `QFontMetrics` |
 | Core       | `Signal`, `Slot`, `QTimer`, `Qt`, `QSize`, `QPoint`, `QRect`, `QColor`, `QFont` |
 
 Not every Qt method is implemented; PySideWeb targets the common application surface.
@@ -90,6 +91,15 @@ gradients, transforms, …) and replays them on an HTML5 `<canvas>` in the brows
 `update()` / `repaint()` repaint it. Pixel *readback* (`QImage`/`QPixmap` inspection)
 still isn't possible — nothing is rasterized on the Python side. See
 [examples/custom_paint.py](examples/custom_paint.py).
+
+### Stylesheets
+
+`setStyleSheet(...)` accepts Qt Style Sheets, not just inline declarations. PySideWeb
+translates rule blocks, `:pressed` / `:hover` / `:checked` pseudo-states, and common
+sub-controls (`::item`, `::chunk`, …) into CSS scoped to that widget's subtree, so a
+stylesheet neither leaks to other widgets nor needs per-property translation in your
+code. Unmapped Qt-only bits (`qproperty-*`, exotic sub-controls) are dropped rather
+than misapplied. See [examples/data_browser.py](examples/data_browser.py).
 
 ### Working with third-party PySide6 libraries
 
@@ -131,14 +141,15 @@ See [examples/README.md](examples/README.md) for details.
   alongside an editable detail form.
 - [custom_paint.py](examples/custom_paint.py) — a resource monitor whose gauge and
   sparkline draw themselves with `QPainter` in `paintEvent`.
+- [data_browser.py](examples/data_browser.py) — a `QTreeWidget` / `QTableWidget` /
+  `QDial` layout themed with a single Qt Style Sheet.
 
 ## Roadmap
 
-- Additional widgets (`QTableWidget`, `QTreeWidget`, `QDial`)
-- QSS stylesheet translation
+- More widgets (`QTreeView`/`QTableView` + models, `QToolButton`, `QDateEdit`)
+- Wider QSS coverage (property selectors, `::` sub-controls we don't model yet)
 - PyPI release
 - Per-session isolation for multiple simultaneous clients
-- Wider `QPainter` coverage (pixmap payloads, text metrics, composition modes)
 
 ## Contributing
 

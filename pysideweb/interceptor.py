@@ -227,22 +227,9 @@ def _build_qtgui_namespace() -> dict[str, Any]:
 
     ns['QCursor'] = QCursor
 
-    # QFontMetrics
-    class QFontMetrics:
-        def __init__(self, font=None):
-            pass
-
-        def horizontalAdvance(self, text: str) -> int:
-            return len(text) * 8
-
-        def height(self) -> int:
-            return 16
-
-        def boundingRect(self, *args):
-            return core.QRect(0, 0, 100, 16)
-
-    ns['QFontMetrics'] = QFontMetrics
-    ns['QFontMetricsF'] = QFontMetrics
+    # Approximate text metrics (per-character width table; no real font engine).
+    ns['QFontMetrics'] = painting.QFontMetrics
+    ns['QFontMetricsF'] = painting.QFontMetricsF
 
     return ns
 

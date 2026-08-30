@@ -16,6 +16,7 @@ uv run python examples/<name>.py
 | [preferences.py](preferences.py) | An application settings screen. Grouped sections of labelled controls (line edits, dropdowns, checkboxes, a slider) with a Save / Reset action bar. |
 | [contacts.py](contacts.py) | A master–detail record manager. A contact list on the left, an editable detail form on the right; select, edit, add, and delete records. |
 | [custom_paint.py](custom_paint.py) | A resource monitor whose widgets draw themselves in `paintEvent` with `QPainter` — a circular gauge (arcs, text) and a scrolling sparkline (polyline, gradient fill), animated by a `QTimer`. Demonstrates the virtual painting pipeline: painter calls are recorded and replayed on a `<canvas>`. |
+| [data_browser.py](data_browser.py) | A file browser: `QTreeWidget` on the left, a `QTableWidget` of details on the right, a `QDial` that filters the table. Styled entirely through one `setStyleSheet` call — the Qt Style Sheet is translated to scoped CSS. |
 | [third_party_widget.py](third_party_widget.py) | A stand-in for a third-party PySide6 library (think pyqtgraph): subclasses `QGraphicsView` and imports from `PySide6.QtCharts`, neither implemented by pysideweb. Demonstrates the universal fallback — nothing crashes, the widget just renders as a labeled placeholder. |
 
 ## Writing your own

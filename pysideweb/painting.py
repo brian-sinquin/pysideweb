@@ -432,18 +432,44 @@ class QPaintDevice:
 # QImage / QPixmap with a payload (data URL) for drawImage/drawPixmap
 # ---------------------------------------------------------------------------
 
+_IMAGE_MIME = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    ".svg": "image/svg+xml",
+}
+
+
 class QImage(QPaintDevice):
-    """Image handle. pysideweb can't decode pixels, but it *can* carry a
-    data-URL through to the browser so ``drawImage`` shows something."""
+    """Image handle. pysideweb can't decode pixels, but it reads the file and
+    carries it to the browser as a ``data:`` URL so ``drawImage`` shows it."""
 
     def __init__(self, *args):
         w = h = 0
         self._src = ""
         if len(args) == 1 and isinstance(args[0], str):
-            self._src = args[0]  # a path/URL; the browser resolves it
+            self.load(args[0])
         elif len(args) >= 2 and isinstance(args[0], int):
             w, h = args[0], args[1]
         super().__init__(w, h)
+
+    def load(self, path: str) -> bool:
+        """Read an image file into a data URL. A path that doesn't resolve to a
+        readable file is kept verbatim (it may be an http/data URL already)."""
+        import base64
+        import os
+
+        if path.startswith(("data:", "http://", "https://", "//")):
+            self._src = path
+            return True
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            self._src = path
+            return False
+        mime = _IMAGE_MIME.get(os.path.splitext(path)[1].lower(), "image/png")
+        self._src = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+        return True
 
     def isNull(self) -> bool:
         return not self._src and self._pd_w == 0
@@ -455,6 +481,12 @@ class QImage(QPaintDevice):
 class QPixmap(QImage):
     def scaled(self, *args, **kwargs):
         return self
+
+    @staticmethod
+    def fromImage(image):
+        p = QPixmap()
+        p._src = getattr(image, "_src", "")
+        return p
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +505,34 @@ class QPainter:
     TextAntialiasing = 0x02
     SmoothPixmapTransform = 0x04
     HighQualityAntialiasing = 0x08
+    LosslessImageRendering = 0x40
+
+    # CompositionMode — value -> canvas globalCompositeOperation, resolved in
+    # renderer.js via COMPOSITE_MODES.
+    CompositionMode_SourceOver = 0
+    CompositionMode_DestinationOver = 1
+    CompositionMode_Clear = 2
+    CompositionMode_Source = 3
+    CompositionMode_Destination = 4
+    CompositionMode_SourceIn = 5
+    CompositionMode_DestinationIn = 6
+    CompositionMode_SourceOut = 7
+    CompositionMode_DestinationOut = 8
+    CompositionMode_SourceAtop = 9
+    CompositionMode_DestinationAtop = 10
+    CompositionMode_Xor = 11
+    CompositionMode_Plus = 12
+    CompositionMode_Multiply = 13
+    CompositionMode_Screen = 14
+    CompositionMode_Overlay = 15
+    CompositionMode_Darken = 16
+    CompositionMode_Lighten = 17
+    CompositionMode_ColorDodge = 18
+    CompositionMode_ColorBurn = 19
+    CompositionMode_HardLight = 20
+    CompositionMode_SoftLight = 21
+    CompositionMode_Difference = 22
+    CompositionMode_Exclusion = 23
 
     def __init__(self, device=None):
         self._commands: list[dict] = []
@@ -749,29 +809,82 @@ class QPainter:
         return _AutoAttr()
 
 
-class _SimpleFontMetrics:
-    """Coarse text metrics — no real font shaping is available server-side."""
+# Per-character width as a fraction of the font size, for a proportional
+# sans-serif. Approximate — there is no real font engine server-side — but far
+# closer than a flat multiplier, which lets drawText-in-rect layout and
+# QFontMetrics-driven sizing land in roughly the right place.
+_CHAR_WIDTH_FACTORS = {
+    " ": 0.28, "i": 0.24, "j": 0.24, "l": 0.24, "I": 0.30, "t": 0.31,
+    "f": 0.31, "r": 0.36, "!": 0.28, ".": 0.28, ",": 0.28, "'": 0.20,
+    "m": 0.86, "M": 0.86, "W": 0.90, "w": 0.76, "G": 0.72, "O": 0.74,
+    "Q": 0.74, "D": 0.72, "H": 0.71, "N": 0.71, "@": 0.95,
+}
+_DEFAULT_CHAR_FACTOR = 0.52  # digits, most lowercase
 
-    def __init__(self, font: QFont):
+
+class QFontMetrics:
+    """Approximate text metrics. pysideweb has no font engine, so widths come
+    from a per-character factor table (see ``_CHAR_WIDTH_FACTORS``) — good
+    enough for layout math in ``paintEvent``, not pixel-exact."""
+
+    def __init__(self, font: QFont | None = None, *_):
+        font = font or QFont()
         size = font.pointSize() if font.pointSize() > 0 else font.pixelSize()
         self._px = size if size > 0 else 12
+        self._bold = bool(getattr(font, "bold", lambda: False)())
 
     def height(self) -> int:
-        return int(self._px * 1.3)
+        return int(round(self._px * 1.32))
+
+    def lineSpacing(self) -> int:
+        return int(round(self._px * 1.45))
+
+    def leading(self) -> int:
+        return max(0, self.lineSpacing() - self.height())
 
     def ascent(self) -> int:
-        return int(self._px)
+        return int(round(self._px * 1.0))
 
     def descent(self) -> int:
-        return int(self._px * 0.3)
+        return int(round(self._px * 0.32))
 
-    def horizontalAdvance(self, text: str) -> int:
-        return int(len(text) * self._px * 0.55)
+    def capHeight(self) -> int:
+        return int(round(self._px * 0.72))
 
+    def horizontalAdvance(self, text: str, *_) -> int:
+        factor = 1.06 if self._bold else 1.0
+        total = sum(
+            _CHAR_WIDTH_FACTORS.get(ch, _DEFAULT_CHAR_FACTOR) for ch in str(text)
+        )
+        return int(round(total * self._px * factor))
+
+    # Qt's older name for horizontalAdvance.
     width = horizontalAdvance
 
-    def boundingRect(self, text: str) -> QRect:
+    def averageCharWidth(self) -> int:
+        return int(round(_DEFAULT_CHAR_FACTOR * self._px))
+
+    def boundingRect(self, *args) -> QRect:
+        text = args[-1] if args and isinstance(args[-1], str) else ""
         return QRect(0, 0, self.horizontalAdvance(text), self.height())
+
+    def elidedText(self, text: str, mode, width: int, *_) -> str:
+        text = str(text)
+        if self.horizontalAdvance(text) <= width:
+            return text
+        ell = "…"
+        while text and self.horizontalAdvance(text + ell) > width:
+            text = text[:-1]
+        return text + ell
+
+
+# Back-compat alias for internal callers.
+_SimpleFontMetrics = QFontMetrics
+
+
+class QFontMetricsF(QFontMetrics):
+    def horizontalAdvance(self, text: str, *_) -> float:
+        return float(super().horizontalAdvance(text))
 
 
 # ---------------------------------------------------------------------------

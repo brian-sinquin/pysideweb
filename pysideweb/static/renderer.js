@@ -24,6 +24,7 @@
     let reconnectDelay = RECONNECT_DELAY;
     let pendingRoots = null;
     let rafId = null;
+    let renderFallbackId = null;
     let isFirstRender = true;
     const appEl = document.getElementById("app");
     const statusEl = document.getElementById("connection-status");
@@ -124,6 +125,14 @@
             if (!rafId) {
                 rafId = requestAnimationFrame(flushRender);
             }
+            // requestAnimationFrame is throttled to ~never while the tab is
+            // hidden or not compositing (background tab, some headless/embedded
+            // views). Without a fallback the very first tree would never paint
+            // there. setTimeout keeps firing regardless, so whichever lands
+            // first renders and cancels the other.
+            if (!renderFallbackId) {
+                renderFallbackId = setTimeout(flushRender, 100);
+            }
         } else if (msg.type === "updates") {
             // Apply property updates directly (no rAF delay or DOM rebuild)
             applyUpdates(msg.updates);
@@ -131,7 +140,8 @@
     }
 
     function flushRender() {
-        rafId = null;
+        if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+        if (renderFallbackId) { clearTimeout(renderFallbackId); renderFallbackId = null; }
         if (pendingRoots) {
             renderTree(pendingRoots);
             pendingRoots = null;
@@ -472,6 +482,15 @@
                 break;
             case "QListWidget":
                 updateListWidget(el, node);
+                break;
+            case "QDial":
+                updateDial(el, node);
+                break;
+            case "QTableWidget":
+                updateTableWidget(el, node);
+                break;
+            case "QTreeWidget":
+                updateTreeWidget(el, node);
                 break;
             case "QSplitter":
                 updateSplitter(el, node);
@@ -1041,6 +1060,9 @@
         QScrollArea: renderScrollArea,
         QStackedWidget: renderStackedWidget,
         QListWidget: renderListWidget,
+        QDial: renderDial,
+        QTableWidget: renderTableWidget,
+        QTreeWidget: renderTreeWidget,
         QSplitter: renderSplitter,
         QMenuBar: renderMenuBar,
         QStatusBar: renderStatusBar,
@@ -1551,6 +1573,220 @@
         return el;
     }
 
+    // ── QDial ──────────────────────────────────────────────────
+
+    const DIAL_MIN_ANGLE = -140;   // degrees, from vertical; matches Qt's look
+    const DIAL_MAX_ANGLE = 140;
+
+    function dialFraction(node) {
+        const min = node.props.minimum ?? 0;
+        const max = node.props.maximum ?? 99;
+        const val = node.props.value ?? 0;
+        return max > min ? (val - min) / (max - min) : 0;
+    }
+
+    function renderDial(node) {
+        const el = document.createElement("div");
+        el.className = "qdial";
+        el.innerHTML = `
+            <svg viewBox="0 0 100 100" class="qdial-svg">
+                <circle class="qdial-track" cx="50" cy="50" r="42"></circle>
+                <path class="qdial-arc" fill="none"></path>
+                <circle class="qdial-knob" r="7"></circle>
+            </svg>
+            <span class="qdial-value"></span>`;
+        paintDial(el, node);
+
+        const svg = el.querySelector("svg");
+        const setFromPointer = (ev) => {
+            const rect = svg.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            let deg = Math.atan2(ev.clientX - cx, cy - ev.clientY) * 180 / Math.PI;
+            deg = Math.max(DIAL_MIN_ANGLE, Math.min(DIAL_MAX_ANGLE, deg));
+            const frac = (deg - DIAL_MIN_ANGLE) / (DIAL_MAX_ANGLE - DIAL_MIN_ANGLE);
+            const min = node.props.minimum ?? 0;
+            const max = node.props.maximum ?? 99;
+            const v = Math.round(min + frac * (max - min));
+            sendEvent(node.id, "valueChanged", v);
+        };
+        let dragging = false;
+        svg.addEventListener("pointerdown", (e) => {
+            dragging = true; svg.setPointerCapture(e.pointerId); setFromPointer(e);
+        });
+        svg.addEventListener("pointermove", (e) => { if (dragging) setFromPointer(e); });
+        svg.addEventListener("pointerup", (e) => {
+            dragging = false; try { svg.releasePointerCapture(e.pointerId); } catch (_) {}
+        });
+        return el;
+    }
+
+    function paintDial(el, node) {
+        const arc = el.querySelector(".qdial-arc");
+        const knob = el.querySelector(".qdial-knob");
+        if (!arc || !knob) return;   // SVG not built yet
+        const frac = Math.max(0, Math.min(1, dialFraction(node)));
+        const a0 = (DIAL_MIN_ANGLE - 90) * Math.PI / 180;
+        const a1 = (DIAL_MIN_ANGLE + frac * (DIAL_MAX_ANGLE - DIAL_MIN_ANGLE) - 90) * Math.PI / 180;
+        const r = 42;
+        const x0 = 50 + r * Math.cos(a0), y0 = 50 + r * Math.sin(a0);
+        const x1 = 50 + r * Math.cos(a1), y1 = 50 + r * Math.sin(a1);
+        const large = (frac * (DIAL_MAX_ANGLE - DIAL_MIN_ANGLE)) > 180 ? 1 : 0;
+        arc.setAttribute("d", `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`);
+        const kr = 30;
+        knob.setAttribute("cx", (50 + kr * Math.cos(a1)).toFixed(2));
+        knob.setAttribute("cy", (50 + kr * Math.sin(a1)).toFixed(2));
+        const label = el.querySelector(".qdial-value");
+        if (label) label.textContent = node.props.value ?? 0;
+    }
+
+    function updateDial(el, node) {
+        paintDial(el, node);
+    }
+
+    // ── QTableWidget ───────────────────────────────────────────
+
+    function buildTable(el, node) {
+        const cells = node.props.cells || [];
+        const hHeaders = node.props.hHeaders || [];
+        const vHeaders = node.props.vHeaders || [];
+        const cols = node.props.cols ?? (cells[0] ? cells[0].length : 0);
+        const curRow = node.props.currentRow ?? -1;
+        const curCol = node.props.currentColumn ?? -1;
+
+        const table = document.createElement("table");
+        table.className = "qtable";
+
+        if (hHeaders.length || vHeaders.length) {
+            const thead = document.createElement("thead");
+            const tr = document.createElement("tr");
+            if (vHeaders.length) tr.appendChild(document.createElement("th"));
+            for (let c = 0; c < cols; c++) {
+                const th = document.createElement("th");
+                th.textContent = hHeaders[c] || "";
+                tr.appendChild(th);
+            }
+            thead.appendChild(tr);
+            table.appendChild(thead);
+        }
+
+        const tbody = document.createElement("tbody");
+        cells.forEach((row, r) => {
+            const tr = document.createElement("tr");
+            if (vHeaders.length) {
+                const th = document.createElement("th");
+                th.scope = "row";
+                th.textContent = vHeaders[r] || (r + 1);
+                tr.appendChild(th);
+            }
+            for (let c = 0; c < cols; c++) {
+                const cell = row[c];
+                const td = document.createElement("td");
+                td.textContent = cell ? (cell.text || "") : "";
+                if (r === curRow && c === curCol) td.classList.add("selected");
+                if (cell && cell.align) applyAlignment(td, cell.align);
+                if (cell && cell.editable) {
+                    td.contentEditable = "true";
+                    td.addEventListener("blur", () => {
+                        sendEvent(node.id, "cellChanged", { row: r, col: c, text: td.textContent });
+                    });
+                }
+                td.addEventListener("click", () => {
+                    sendEvent(node.id, "cellClicked", { row: r, col: c });
+                });
+                tr.appendChild(td);
+            }
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+
+        el.replaceChildren(table);
+    }
+
+    function renderTableWidget(node) {
+        const el = document.createElement("div");
+        el.className = "qtablewidget";
+        buildTable(el, node);
+        return el;
+    }
+
+    function updateTableWidget(el, node) {
+        buildTable(el, node);
+    }
+
+    // ── QTreeWidget ────────────────────────────────────────────
+
+    function buildTree(el, node) {
+        const headers = node.props.headers || [];
+        const tree = node.props.tree || [];
+        el.replaceChildren();
+
+        if (headers.length) {
+            const head = document.createElement("div");
+            head.className = "qtree-head";
+            for (const h of headers) {
+                const c = document.createElement("span");
+                c.className = "qtree-hcell";
+                c.textContent = h;
+                head.appendChild(c);
+            }
+            el.appendChild(head);
+        }
+
+        const makeRows = (items, path, depth, container) => {
+            items.forEach((it, i) => {
+                const here = path.concat(i);
+                const rowEl = document.createElement("div");
+                rowEl.className = "qtree-row" + (it.selected ? " selected" : "");
+                rowEl.style.paddingLeft = (depth * 16 + 6) + "px";
+
+                const twisty = document.createElement("span");
+                twisty.className = "qtree-twisty";
+                if (it.children && it.children.length) {
+                    twisty.textContent = it.expanded ? "▾" : "▸";
+                    twisty.addEventListener("click", (e) => {
+                        e.stopPropagation();
+                        sendEvent(node.id, "itemToggled", { path: here });
+                    });
+                } else {
+                    twisty.classList.add("leaf");
+                }
+                rowEl.appendChild(twisty);
+
+                (it.texts && it.texts.length ? it.texts : [""]).forEach((t, ci) => {
+                    const cell = document.createElement("span");
+                    cell.className = "qtree-cell";
+                    cell.textContent = t;
+                    cell.addEventListener("click", () => {
+                        sendEvent(node.id, "itemClicked", { path: here, col: ci });
+                    });
+                    rowEl.appendChild(cell);
+                });
+
+                container.appendChild(rowEl);
+                if (it.children && it.children.length && it.expanded) {
+                    makeRows(it.children, here, depth + 1, container);
+                }
+            });
+        };
+
+        const body = document.createElement("div");
+        body.className = "qtree-body";
+        makeRows(tree, [], 0, body);
+        el.appendChild(body);
+    }
+
+    function renderTreeWidget(node) {
+        const el = document.createElement("div");
+        el.className = "qtreewidget";
+        buildTree(el, node);
+        return el;
+    }
+
+    function updateTreeWidget(el, node) {
+        buildTree(el, node);
+    }
+
     function renderSplitter(node) {
         const el = document.createElement("div");
         el.className = "qsplitter";
@@ -1658,26 +1894,183 @@
     // ── Style Helpers ──────────────────────────────────────────
 
     function applyStyleSheet(el, css) {
+        // Clear anything a previous stylesheet put on this element.
         if (el._appliedStyles) {
-            for (const prop of el._appliedStyles) {
-                el.style[prop] = "";
-            }
+            for (const prop of el._appliedStyles) el.style[prop] = "";
         }
         el._appliedStyles = [];
+        removeScopedStyle(el);
 
-        const propertyRegex = /([a-zA-Z-]+)\s*:\s*([^;]+)/g;
-        let match;
-        while ((match = propertyRegex.exec(css)) !== null) {
-            const prop = match[1].trim();
-            const val = match[2].trim();
-            const cssProp = prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+        if (!css) return;
+
+        if (css.indexOf("{") === -1) {
+            // Bare declaration list (`color: red; font-weight: bold`) — set inline.
+            applyDeclarations(el, css);
+            return;
+        }
+
+        // Full QSS with selector blocks — translate to scoped CSS and inject.
+        const wid = el.dataset.wid;
+        if (!wid) { applyDeclarations(el, css); return; }
+        const translated = translateQss(css, `[data-wid="${wid}"]`);
+        if (!translated) return;
+        const style = document.createElement("style");
+        style.dataset.qssFor = wid;
+        style.textContent = translated;
+        document.head.appendChild(style);
+        el._scopedStyle = style;
+    }
+
+    function removeScopedStyle(el) {
+        if (el._scopedStyle && el._scopedStyle.parentNode) {
+            el._scopedStyle.parentNode.removeChild(el._scopedStyle);
+        }
+        el._scopedStyle = null;
+        const wid = el.dataset && el.dataset.wid;
+        if (wid) {
+            document.head
+                .querySelectorAll(`style[data-qss-for="${wid}"]`)
+                .forEach(s => s.remove());
+        }
+    }
+
+    function applyDeclarations(el, decls) {
+        const re = /([a-zA-Z-]+)\s*:\s*([^;]+)/g;
+        let m;
+        while ((m = re.exec(decls)) !== null) {
+            const cssProp = m[1].trim().replace(/-([a-z])/g, (_, c) => c.toUpperCase());
             try {
-                el.style[cssProp] = val;
+                el.style[cssProp] = m[2].trim();
                 el._appliedStyles.push(cssProp);
-            } catch (e) {
-                // Ignore invalid properties
+            } catch (e) { /* ignore invalid */ }
+        }
+    }
+
+    // ── QSS → CSS ──────────────────────────────────────────────
+    //
+    // Qt Style Sheets are CSS-like but not CSS: `QPushButton:pressed`, sub
+    // controls like `::item` / `::chunk`, and a handful of Qt-only properties.
+    // This turns a widget's stylesheet into real CSS rules scoped to that
+    // widget's subtree (`[data-wid="wN"] ...`) so they neither leak nor need a
+    // per-property inline assignment.
+
+    const QSS_PSEUDO = {
+        pressed: ":active", hover: ":hover", checked: ":checked",
+        unchecked: ":not(:checked)", disabled: ":disabled", enabled: ":enabled",
+        focus: ":focus", "on": ":checked", "off": ":not(:checked)",
+        selected: ".selected", first: ":first-child", last: ":last-child",
+        "read-only": ":read-only", "no-frame": "",
+    };
+
+    // Sub-control → a single descendant selector matching what our renderers
+    // emit. A sub-control we can't map to one element is left out (null) and
+    // the rule is skipped rather than mis-targeted.
+    const QSS_SUBCONTROL = {
+        item: " .list-item",
+        indicator: " input",
+        handle: " input[type=range]",
+        chunk: " .progress-fill",
+        tab: " .tab-item", "tab-bar": " .tab-bar", pane: " .tab-content",
+        title: " .group-title", section: " th",
+        "add-line": null, "sub-line": null, "up-button": null,
+        "down-button": null, "drop-down": null, "up-arrow": null,
+        "down-arrow": null, groove: null, "add-page": null, "sub-page": null,
+    };
+
+    const QSS_DROP_PROPS = /^(qproperty-|subcontrol-|alternate-background-color|gridline-color|show-decoration-selected|selection-color|selection-background-color|titlebar-|button-layout|messagebox-|icon-size$|spacing$)/;
+
+    function translateQss(qss, scope) {
+        // Strip comments.
+        qss = qss.replace(/\/\*[\s\S]*?\*\//g, "");
+        const out = [];
+        const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+        let m;
+        while ((m = ruleRe.exec(qss)) !== null) {
+            const selectors = m[1].split(",").map(s => s.trim()).filter(Boolean);
+            const body = translateQssBody(m[2]);
+            if (!body) continue;
+            const cssSelectors = [];
+            for (const sel of selectors) {
+                const t = translateQssSelector(sel, scope);
+                if (t) cssSelectors.push(t);
+            }
+            if (cssSelectors.length) {
+                out.push(`${cssSelectors.join(",\n")} { ${body} }`);
             }
         }
+        return out.join("\n");
+    }
+
+    function translateQssBody(body) {
+        const keep = [];
+        for (const decl of body.split(";")) {
+            const idx = decl.indexOf(":");
+            if (idx === -1) continue;
+            const prop = decl.slice(0, idx).trim().toLowerCase();
+            const val = decl.slice(idx + 1).trim();
+            if (!prop || !val || QSS_DROP_PROPS.test(prop)) continue;
+            keep.push(`${prop}: ${val}`);
+        }
+        return keep.join("; ");
+    }
+
+    function translateQssSelector(sel, scope) {
+        // Pull off one sub-control (`::item`) and any pseudo-states first.
+        let subControl = "";
+        let unmappedSub = false;
+        sel = sel.replace(/::([a-z-]+)/g, (_, name) => {
+            if (name in QSS_SUBCONTROL) {
+                const mapped = QSS_SUBCONTROL[name];
+                if (mapped === null) unmappedSub = true;
+                else subControl = mapped;
+            } else {
+                unmappedSub = true;
+            }
+            return "";
+        });
+        if (unmappedSub) return "";   // don't mis-target a control we don't model
+
+        let pseudo = "";
+        sel = sel.replace(/:([a-z-]+)/g, (_, name) => {
+            const mapped = QSS_PSEUDO[name];
+            if (mapped === undefined) return "";      // unknown Qt state: drop
+            pseudo += mapped;
+            return "";
+        });
+        sel = sel.trim();
+
+        // Compound chain split on descendant / child combinators.
+        const parts = sel.split(/\s+/).filter(Boolean);
+        const compiled = parts.map(compileCompound);
+        if (compiled.some(p => p === null)) return "";
+        const core = compiled.join(" ") || "*";
+
+        // pseudo is either a real CSS pseudo (":active") or a class our
+        // renderer sets (".selected"); it attaches to the innermost target —
+        // the sub-control if there is one, else the last compound of core.
+        if (subControl) {
+            return `${scope} ${core}${subControl}${pseudo}`;
+        }
+        if (parts.length <= 1) {
+            // Single element: match the host itself and its descendants.
+            return `${scope}${core}${pseudo}, ${scope} ${core}${pseudo}`;
+        }
+        return `${scope} ${core}${pseudo}`;
+    }
+
+    function compileCompound(tok) {
+        if (tok === ">" || tok === "*") return tok;
+        // #objectName
+        let out = "";
+        const idM = tok.match(/#([A-Za-z0-9_-]+)/);
+        if (idM) { out += `#${idM[1]}`; tok = tok.replace(idM[0], ""); }
+        // [attr="v"] — pass through (harmless if it matches nothing)
+        const attrM = tok.match(/\[[^\]]+\]/);
+        if (attrM) { out += attrM[0]; tok = tok.replace(attrM[0], ""); }
+        // .Class or Type  → .lowercase
+        const nameM = tok.match(/\.?([A-Za-z_][A-Za-z0-9_]*)/);
+        if (nameM) out = `.${nameM[1].toLowerCase()}` + out;
+        return out || null;
     }
 
     function applyFont(el, font) {
@@ -1716,6 +2109,17 @@
         dot: [1, 3],
         dashdot: [6, 3, 1, 3],
         dashdotdot: [6, 3, 1, 3, 1, 3],
+    };
+
+    // QPainter.CompositionMode_* value → canvas globalCompositeOperation.
+    // (see QPainter.CompositionMode_* in pysideweb/painting.py)
+    const COMPOSITE_MODES = {
+        0: "source-over", 1: "destination-over", 2: "clear", 3: "copy",
+        4: "destination", 5: "source-in", 6: "destination-in", 7: "source-out",
+        8: "destination-out", 9: "source-atop", 10: "destination-atop",
+        11: "xor", 12: "lighter", 13: "multiply", 14: "screen", 15: "overlay",
+        16: "darken", 17: "lighten", 18: "color-dodge", 19: "color-burn",
+        20: "hard-light", 21: "soft-light", 22: "difference", 23: "exclusion",
     };
 
     function penStroke(ctx, pen) {
@@ -1784,6 +2188,7 @@
                 case "opacity":
                     ctx.globalAlpha = c.value; break;
                 case "composite":
+                    ctx.globalCompositeOperation = COMPOSITE_MODES[c.mode] || "source-over";
                     break;
                 case "save":
                     ctx.save(); break;

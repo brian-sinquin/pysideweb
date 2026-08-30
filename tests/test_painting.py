@@ -172,6 +172,75 @@ class TestPrimitives:
         assert cmd["color"] == "rgba(9,9,9,1.000)"
 
 
+class TestCompositionAndOpacity:
+    def test_composition_mode_recorded(self):
+        from PySide6.QtGui import QPainter as _QP
+
+        w = _Custom(lambda p: (
+            p.setCompositionMode(_QP.CompositionMode_Multiply),
+            p.drawRect(0, 0, 5, 5),
+        ))
+        w.show()
+        cmd = [c for c in _paint_of(w)["commands"] if c["op"] == "composite"][0]
+        assert cmd["mode"] == _QP.CompositionMode_Multiply
+
+    def test_opacity_recorded(self):
+        w = _Custom(lambda p: (p.setOpacity(0.4), p.drawRect(0, 0, 5, 5)))
+        w.show()
+        cmd = [c for c in _paint_of(w)["commands"] if c["op"] == "opacity"][0]
+        assert cmd["value"] == 0.4
+
+
+class TestImagePayload:
+    def test_qimage_reads_file_as_data_url(self, tmp_path):
+        from PySide6.QtGui import QImage
+
+        png = tmp_path / "x.png"
+        # 1x1 transparent PNG
+        png.write_bytes(bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+            "890000000a49444154789c6300010000050001a5f645400000000049454e44ae"
+            "426082"
+        ))
+        img = QImage(str(png))
+        assert img._wire_src().startswith("data:image/png;base64,")
+
+        w = _Custom(lambda p: p.drawImage(_R(0, 0, 10, 10), QImage(str(png))))
+        w.show()
+        cmd = [c for c in _paint_of(w)["commands"] if c["op"] == "drawImage"][0]
+        assert cmd["src"].startswith("data:image/png;base64,")
+
+    def test_missing_file_kept_verbatim_not_crash(self):
+        from PySide6.QtGui import QImage
+
+        img = QImage("does/not/exist.png")
+        assert img._wire_src() == "does/not/exist.png"
+
+    def test_url_passed_through(self):
+        from PySide6.QtGui import QPixmap
+
+        assert QPixmap("https://example.com/a.png")._wire_src() == "https://example.com/a.png"
+
+
+class TestFontMetrics:
+    def test_width_scales_with_size_and_text(self):
+        from PySide6.QtGui import QFont, QFontMetrics
+
+        fm12 = QFontMetrics(QFont("Arial", 12))
+        fm24 = QFontMetrics(QFont("Arial", 24))
+        assert fm24.horizontalAdvance("hello") > fm12.horizontalAdvance("hello")
+        assert fm12.horizontalAdvance("mmmm") > fm12.horizontalAdvance("iiii")
+        assert fm12.height() > 0 and fm12.ascent() > fm12.descent()
+
+    def test_elided_text(self):
+        from PySide6.QtGui import QFont, QFontMetrics
+
+        fm = QFontMetrics(QFont("Arial", 12))
+        full = "a fairly long label that will not fit"
+        out = fm.elidedText(full, 0, 40)
+        assert out.endswith("…") and len(out) < len(full)
+
+
 class TestGraceful:
     def test_unknown_painter_method_is_noop(self):
         w = _Custom(lambda p: p.drawSomethingExotic(1, 2, 3))
