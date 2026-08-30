@@ -15,6 +15,7 @@ from .core import (
     Prop,
     QFont,
     QIcon,
+    QObject,
     QSize,
     Qt,
     Signal,
@@ -28,7 +29,7 @@ _warned_unknown_methods: set[str] = set()
 # Base: QWidget
 # ---------------------------------------------------------------------------
 
-class QWidget:
+class QWidget(QObject):
     """Virtual QWidget — base class for all virtual widgets."""
 
     _widget_type = "QWidget"
@@ -39,17 +40,14 @@ class QWidget:
     windowTitle = Prop("", notify=True)
     toolTip = Prop("", in_props=False)  # reported under the "tooltip" wire key below
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        _register_props(cls)
-
     def __init__(self, parent=None, flags=None):
+        self._props: dict[str, Any] = {name: p.default for name, p in self._declared_props.items()}
+        QObject.__init__(self, None)  # sets _signals_blocked, _dynamic_props, etc.
         self._wid: str = state.register_widget(self)
         self._parent = parent
         self._children: list[QWidget] = []
         self._layout = None
         self._parent_layout = None
-        self._props: dict[str, Any] = {name: p.default for name, p in self._declared_props.items()}
         self._visible = True
         self._enabled = True
         self._min_size = QSize(0, 0)
@@ -1646,8 +1644,9 @@ class QSplitter(QWidget):
 # QMenuBar / QMenu / QAction / QToolBar / QStatusBar (stubs)
 # ---------------------------------------------------------------------------
 
-class QAction:
+class QAction(QObject):
     triggered = Signal()
+    toggled = Signal(bool)
 
     text = Prop("")
     enabled = Prop(True, getter="isEnabled")
@@ -1656,6 +1655,7 @@ class QAction:
 
     def __init__(self, *args, parent=None):
         self._props: dict = {name: p.default for name, p in self._declared_props.items()}
+        QObject.__init__(self, parent)
         text = args[0] if args and isinstance(args[0], str) else ""
         if len(args) > 1 and isinstance(args[0], (QIcon, str)):
             text = args[1] if len(args) > 1 else ""
@@ -1663,6 +1663,16 @@ class QAction:
         self._icon = QIcon()
         self._shortcut = ""
         self._parent = parent
+
+    def trigger(self):
+        if self.isCheckable():
+            self.setChecked(not self.isChecked())
+            self.toggled.emit(self.isChecked())
+        self.triggered.emit()
+
+    def setChecked(self, checked: bool):
+        self._raw_set_checked(bool(checked))
+        self.toggled.emit(bool(checked))
 
     def setShortcut(self, shortcut):
         self._shortcut = str(shortcut)

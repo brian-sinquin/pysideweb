@@ -69,6 +69,15 @@ def _slot_arity(slot: Callable) -> tuple[bool, int]:
     return False, max_params
 
 
+# Stack of signal owners currently emitting, so QObject.sender() can report
+# who invoked the slot that's running (mirrors Qt's QObject::sender()).
+_emit_sender_stack: list = []
+
+# Set PYSIDEWEB_STRICT=1 to re-raise slot exceptions (and unknown-API access)
+# instead of swallowing them -- useful while developing an app against pysideweb.
+_STRICT = bool(os.environ.get("PYSIDEWEB_STRICT"))
+
+
 class BoundSignal:
     """A signal bound to a specific widget instance."""
 
@@ -80,22 +89,29 @@ class BoundSignal:
 
     def connect(self, slot: Callable):
         self._slots.append((slot, *_slot_arity(slot)))
+        return True
 
     def disconnect(self, slot: Callable | None = None):
         if slot is None:
             self._slots.clear()
         else:
             self._slots = [s for s in self._slots if s[0] is not slot]
+        return True
 
     def emit(self, *args):
-        for slot, accepts_all, max_params in self._slots[:]:  # copy: allow modification during iteration
-            try:
-                if accepts_all:
-                    slot(*args)
-                else:
-                    slot(*args[:max_params])
-            except Exception as e:
-                print(f"[PySideWeb] Signal error in {self._signal._name}: {e}")
+        if getattr(self._owner, "_signals_blocked", False):
+            return
+        _emit_sender_stack.append(self._owner)
+        try:
+            for slot, accepts_all, max_params in self._slots[:]:  # copy: allow modification mid-iteration
+                try:
+                    slot(*args) if accepts_all else slot(*args[:max_params])
+                except Exception as e:
+                    if _STRICT:
+                        raise
+                    print(f"[PySideWeb] Signal error in {self._signal._name}: {e}")
+        finally:
+            _emit_sender_stack.pop()
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +281,325 @@ def _register_props(cls) -> None:
 
 
 # ---------------------------------------------------------------------------
+# QObject — root of the Qt object hierarchy
+# ---------------------------------------------------------------------------
+#
+# Real Qt: QWidget IS-A QObject. Third-party code relies on that constantly --
+# isinstance(x, QObject), class Thing(QObject) for signals, QObject.__init__,
+# blockSignals(), sender(), findChild(), setProperty(). Before this class,
+# QtCore.QObject was an unrelated inline stub and QWidget didn't inherit it, so
+# every one of those checks failed. QWidget, QTimer and QAction now inherit
+# this, and the interceptor exports this exact class as QtCore.QObject.
+
+class QObject:
+    """Root of the object hierarchy: object name, parent/child ownership,
+    signal blocking, dynamic properties, event-filter hooks."""
+
+    _declared_props: dict = {}
+
+    objectName = Prop("")
+
+    destroyed = Signal(object)
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        _register_props(cls)
+
+    def __init__(self, parent=None):
+        # A subclass (e.g. QWidget) may have already built _props.
+        if not hasattr(self, "_props"):
+            self._props = {n: p.default for n, p in self._declared_props.items()}
+        self._qobject_parent = None
+        self._qobject_children: list = []
+        self._signals_blocked = False
+        self._dynamic_props: dict = {}
+        self._event_filters: list = []
+        if parent is not None:
+            self.setParent(parent)
+
+    # -- ownership --
+    def setParent(self, parent):
+        old = self._qobject_parent
+        if old is not None and self in getattr(old, "_qobject_children", ()):
+            old._qobject_children.remove(self)
+        self._qobject_parent = parent
+        kids = getattr(parent, "_qobject_children", None)
+        if kids is not None and self not in kids:
+            kids.append(self)
+
+    def parent(self):
+        return self._qobject_parent
+
+    def children(self):
+        return list(self._qobject_children)
+
+    # -- signal blocking --
+    def blockSignals(self, block: bool) -> bool:
+        old = self._signals_blocked
+        self._signals_blocked = bool(block)
+        return old
+
+    def signalsBlocked(self) -> bool:
+        return self._signals_blocked
+
+    # -- dynamic properties --
+    def setProperty(self, name: str, value) -> bool:
+        existed = name in self._dynamic_props
+        self._dynamic_props[name] = value
+        return existed
+
+    def property(self, name: str):
+        return self._dynamic_props.get(name)
+
+    def dynamicPropertyNames(self):
+        return list(self._dynamic_props)
+
+    # -- event filters (no native event loop, so these are inert but present) --
+    def installEventFilter(self, obj):
+        if obj not in self._event_filters:
+            self._event_filters.append(obj)
+
+    def removeEventFilter(self, obj):
+        if obj in self._event_filters:
+            self._event_filters.remove(obj)
+
+    def eventFilter(self, obj, event):
+        return False
+
+    def event(self, event):
+        return False
+
+    def deleteLater(self):
+        pass
+
+    # -- introspection --
+    def _iter_child_objects(self):
+        for c in self._qobject_children:
+            yield c
+            if hasattr(c, "_iter_child_objects"):
+                yield from c._iter_child_objects()
+
+    def findChild(self, type_=None, name: str = "", *args):
+        for c in self._iter_child_objects():
+            if (not name or _obj_name(c) == name) and (type_ is None or isinstance(c, type_)):
+                return c
+        return None
+
+    def findChildren(self, type_=None, name: str = "", *args):
+        return [
+            c for c in self._iter_child_objects()
+            if (not name or _obj_name(c) == name) and (type_ is None or isinstance(c, type_))
+        ]
+
+    def inherits(self, class_name: str) -> bool:
+        return any(k.__name__ == class_name for k in type(self).__mro__)
+
+    def metaObject(self):
+        return _AutoAttr()
+
+    def thread(self):
+        return _AutoAttr()
+
+    def moveToThread(self, thread):
+        pass
+
+    def sender(self):
+        return _emit_sender_stack[-1] if _emit_sender_stack else None
+
+    @staticmethod
+    def tr(text, *args, **kwargs):
+        return text
+
+    @staticmethod
+    def connect(*args, **kwargs):
+        # QObject.connect(sender, signal, receiver, slot) old-style form.
+        if len(args) >= 2 and hasattr(args[1], "connect"):
+            args[1].connect(args[-1])
+        return True
+
+
+def _obj_name(obj) -> str:
+    getter = getattr(obj, "objectName", None)
+    return getter() if callable(getter) else ""
+
+
+class QEvent:
+    """Minimal QEvent. `type()` returns whatever int/enum it was built with."""
+
+    # A few commonly-checked types (values match Qt).
+    Type = None
+    MouseButtonPress = 2
+    MouseButtonRelease = 3
+    KeyPress = 6
+    KeyRelease = 7
+    Resize = 14
+    Show = 17
+    Hide = 18
+    Close = 19
+    Paint = 12
+
+    def __init__(self, type_=0):
+        self._type = type_
+        self._accepted = True
+
+    def type(self):
+        return self._type
+
+    def accept(self):
+        self._accepted = True
+
+    def ignore(self):
+        self._accepted = False
+
+    def isAccepted(self) -> bool:
+        return self._accepted
+
+    def setAccepted(self, accepted: bool):
+        self._accepted = bool(accepted)
+
+
+class QUrl:
+    def __init__(self, url: str = ""):
+        self._url = url.toString() if isinstance(url, QUrl) else str(url)
+
+    def toString(self, *args) -> str:
+        return self._url
+
+    def url(self, *args) -> str:
+        return self._url
+
+    def isValid(self) -> bool:
+        return bool(self._url)
+
+    def isEmpty(self) -> bool:
+        return not self._url
+
+    def scheme(self) -> str:
+        return self._url.split(":", 1)[0] if ":" in self._url else ""
+
+    def toLocalFile(self) -> str:
+        return self._url[8:] if self._url.startswith("file:///") else self._url
+
+    @staticmethod
+    def fromLocalFile(path: str) -> QUrl:
+        return QUrl(f"file:///{path.lstrip('/')}")
+
+    def __str__(self) -> str:
+        return self._url
+
+    def __repr__(self) -> str:
+        return f"QUrl('{self._url}')"
+
+
+class QModelIndex:
+    def __init__(self, row: int = -1, col: int = -1, parent=None):
+        self._row = row
+        self._col = col
+        self._parent = parent
+
+    def row(self) -> int:
+        return self._row
+
+    def column(self) -> int:
+        return self._col
+
+    def isValid(self) -> bool:
+        return self._row >= 0 and self._col >= 0
+
+    def parent(self):
+        return self._parent if self._parent is not None else QModelIndex()
+
+    def data(self, role: int = 0):
+        return None
+
+    def __eq__(self, other):
+        return (isinstance(other, QModelIndex)
+                and (self._row, self._col) == (other._row, other._col))
+
+    def __hash__(self):
+        return hash((self._row, self._col))
+
+
+class QSettings(QObject):
+    """Persistent settings, backed by a JSON file under the user config dir.
+
+    Real apps call ``QSettings()`` on startup and read values with a default
+    (``settings.value("geometry", QByteArray())``). The universal fallback
+    would drop that default; this keeps it, and actually persists.
+    """
+
+    NativeFormat = 0
+    IniFormat = 1
+    UserScope = 0
+    SystemScope = 1
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(None)
+        parts = [a for a in args if isinstance(a, str)]
+        org = parts[0] if parts else "pysideweb"
+        app = parts[1] if len(parts) > 1 else "app"
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+            os.path.expanduser("~"), ".config"
+        )
+        self._path = os.path.join(base, "pysideweb", f"{org}-{app}.json")
+        self._group = ""
+        self._data: dict = {}
+        try:
+            import json
+            with open(self._path, encoding="utf-8") as fh:
+                self._data = json.load(fh)
+        except (OSError, ValueError):
+            self._data = {}
+
+    def _key(self, key: str) -> str:
+        return f"{self._group}/{key}" if self._group else key
+
+    def value(self, key: str, default=None, type=None):
+        val = self._data.get(self._key(key), default)
+        if type is not None and val is not None:
+            try:
+                return type(val)
+            except (TypeError, ValueError):
+                return default
+        return val
+
+    def setValue(self, key: str, value):
+        self._data[self._key(key)] = value
+        self.sync()
+
+    def remove(self, key: str):
+        self._data.pop(self._key(key), None)
+        self.sync()
+
+    def contains(self, key: str) -> bool:
+        return self._key(key) in self._data
+
+    def allKeys(self):
+        return list(self._data)
+
+    def beginGroup(self, prefix: str):
+        self._group = f"{self._group}/{prefix}" if self._group else prefix
+
+    def endGroup(self):
+        self._group = self._group.rsplit("/", 1)[0] if "/" in self._group else ""
+
+    def group(self) -> str:
+        return self._group
+
+    def sync(self):
+        try:
+            import json
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            with open(self._path, "w", encoding="utf-8") as fh:
+                json.dump(self._data, fh, default=str)
+        except OSError:
+            pass
+
+    def fileName(self) -> str:
+        return self._path
+
+
+# ---------------------------------------------------------------------------
 # Qt Namespace
 # ---------------------------------------------------------------------------
 
@@ -338,15 +673,201 @@ class _CursorShape(IntEnum):
     IBeamCursor = 4
 
 class _Key(IntEnum):
-    Key_Return = 0x01000004
-    Key_Enter = 0x01000005
     Key_Escape = 0x01000000
     Key_Tab = 0x01000001
+    Key_Backtab = 0x01000002
     Key_Backspace = 0x01000003
+    Key_Return = 0x01000004
+    Key_Enter = 0x01000005
+    Key_Insert = 0x01000006
     Key_Delete = 0x01000007
+    Key_Pause = 0x01000008
+    Key_Print = 0x01000009
+    Key_Home = 0x01000010
+    Key_End = 0x01000011
+    Key_Left = 0x01000012
+    Key_Up = 0x01000013
+    Key_Right = 0x01000014
+    Key_Down = 0x01000015
+    Key_PageUp = 0x01000016
+    Key_PageDown = 0x01000017
+    Key_Shift = 0x01000020
+    Key_Control = 0x01000021
+    Key_Meta = 0x01000022
+    Key_Alt = 0x01000023
+    Key_CapsLock = 0x01000024
+    Key_NumLock = 0x01000025
+    Key_ScrollLock = 0x01000026
+    Key_F1 = 0x01000030
+    Key_F2 = 0x01000031
+    Key_F3 = 0x01000032
+    Key_F4 = 0x01000033
+    Key_F5 = 0x01000034
+    Key_F6 = 0x01000035
+    Key_F7 = 0x01000036
+    Key_F8 = 0x01000037
+    Key_F9 = 0x01000038
+    Key_F10 = 0x01000039
+    Key_F11 = 0x0100003a
+    Key_F12 = 0x0100003b
+    Key_Menu = 0x01000055
+    Key_Help = 0x01000058
     Key_Space = 0x20
+    Key_Exclam = 0x21
+    Key_QuoteDbl = 0x22
+    Key_NumberSign = 0x23
+    Key_Dollar = 0x24
+    Key_Percent = 0x25
+    Key_Ampersand = 0x26
+    Key_Apostrophe = 0x27
+    Key_ParenLeft = 0x28
+    Key_ParenRight = 0x29
+    Key_Asterisk = 0x2a
+    Key_Plus = 0x2b
+    Key_Comma = 0x2c
+    Key_Minus = 0x2d
+    Key_Period = 0x2e
+    Key_Slash = 0x2f
+    Key_0 = 0x30
+    Key_1 = 0x31
+    Key_2 = 0x32
+    Key_3 = 0x33
+    Key_4 = 0x34
+    Key_5 = 0x35
+    Key_6 = 0x36
+    Key_7 = 0x37
+    Key_8 = 0x38
+    Key_9 = 0x39
+    Key_Colon = 0x3a
+    Key_Semicolon = 0x3b
+    Key_Less = 0x3c
+    Key_Equal = 0x3d
+    Key_Greater = 0x3e
+    Key_Question = 0x3f
+    Key_At = 0x40
     Key_A = 0x41
+    Key_B = 0x42
+    Key_C = 0x43
+    Key_D = 0x44
+    Key_E = 0x45
+    Key_F = 0x46
+    Key_G = 0x47
+    Key_H = 0x48
+    Key_I = 0x49
+    Key_J = 0x4a
+    Key_K = 0x4b
+    Key_L = 0x4c
+    Key_M = 0x4d
+    Key_N = 0x4e
+    Key_O = 0x4f
+    Key_P = 0x50
+    Key_Q = 0x51
+    Key_R = 0x52
+    Key_S = 0x53
+    Key_T = 0x54
+    Key_U = 0x55
+    Key_V = 0x56
+    Key_W = 0x57
+    Key_X = 0x58
+    Key_Y = 0x59
     Key_Z = 0x5a
+    Key_BracketLeft = 0x5b
+    Key_Backslash = 0x5c
+    Key_BracketRight = 0x5d
+    Key_Underscore = 0x5f
+    Key_BraceLeft = 0x7b
+    Key_Bar = 0x7c
+    Key_BraceRight = 0x7d
+
+
+class _MouseButton(IntFlag):
+    NoButton = 0x00000000
+    LeftButton = 0x00000001
+    RightButton = 0x00000002
+    MiddleButton = 0x00000004
+    BackButton = 0x00000008
+    ForwardButton = 0x00000010
+
+
+class _KeyboardModifier(IntFlag):
+    NoModifier = 0x00000000
+    ShiftModifier = 0x02000000
+    ControlModifier = 0x04000000
+    AltModifier = 0x08000000
+    MetaModifier = 0x10000000
+    KeypadModifier = 0x20000000
+
+
+class _ItemDataRole(IntEnum):
+    DisplayRole = 0
+    DecorationRole = 1
+    EditRole = 2
+    ToolTipRole = 3
+    StatusTipRole = 4
+    WhatsThisRole = 5
+    FontRole = 6
+    TextAlignmentRole = 7
+    BackgroundRole = 8
+    ForegroundRole = 9
+    CheckStateRole = 10
+    SizeHintRole = 13
+    InitialSortOrderRole = 14
+    UserRole = 256
+
+
+class _FocusPolicy(IntEnum):
+    NoFocus = 0
+    TabFocus = 1
+    ClickFocus = 2
+    StrongFocus = 11
+    WheelFocus = 15
+
+
+class _TextFormat(IntEnum):
+    PlainText = 0
+    RichText = 1
+    AutoText = 2
+    MarkdownText = 3
+
+
+class _ContextMenuPolicy(IntEnum):
+    NoContextMenu = 0
+    PreventContextMenu = 4
+    DefaultContextMenu = 1
+    ActionsContextMenu = 2
+    CustomContextMenu = 3
+
+
+class _ConnectionType(IntEnum):
+    AutoConnection = 0
+    DirectConnection = 1
+    QueuedConnection = 2
+    BlockingQueuedConnection = 3
+    UniqueConnection = 0x80
+
+
+class _AspectRatioMode(IntEnum):
+    IgnoreAspectRatio = 0
+    KeepAspectRatio = 1
+    KeepAspectRatioByExpanding = 2
+
+
+class _TransformationMode(IntEnum):
+    FastTransformation = 0
+    SmoothTransformation = 1
+
+
+class _TextElideMode(IntEnum):
+    ElideLeft = 0
+    ElideRight = 1
+    ElideMiddle = 2
+    ElideNone = 3
+
+
+class _LayoutDirection(IntEnum):
+    LeftToRight = 0
+    RightToLeft = 1
+    LayoutDirectionAuto = 2
 
 class _PenStyle(IntEnum):
     NoPen = 0
@@ -403,21 +924,57 @@ class _GlobalColor(IntEnum):
     darkYellow = 18
     transparent = 19
 
-class Qt:
+class _QtConst(int):
+    """Placeholder for a `Qt.<member>` pysideweb doesn't ship a real value for.
+
+    Distinct names get distinct, stable values, so `event.key() == Qt.Key_Xyz`
+    is at least self-consistent instead of raising AttributeError (the old
+    behaviour) or collapsing every unknown member to 0. Bitwise use is
+    meaningless but won't crash.
+    """
+
+    def __new__(cls, name: str):
+        obj = int.__new__(cls, 0x7F000000 | (hash(name) & 0x00FFFFFF))
+        obj._qt_name = name
+        return obj
+
+    def __repr__(self):
+        return f"Qt.{self._qt_name}"
+
+
+class _QtMeta(type):
+    """Makes `Qt.<anything unknown>` return a stable `_QtConst` instead of
+    raising. Real members (set by `_export_enum` below) are found first and
+    never reach here."""
+
+    _unknown: dict = {}
+
+    def __getattr__(cls, name: str):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        c = _QtMeta._unknown.get(name)
+        if c is None:
+            c = _QtMeta._unknown[name] = _QtConst(name)
+        return c
+
+
+class Qt(metaclass=_QtMeta):
     """Namespace mirroring PySide6.QtCore.Qt.
 
-    Every member of the enums above is exposed here under its own name
-    (e.g. `_AlignmentFlag.AlignLeft` -> `Qt.AlignLeft`). Rather than
-    hand-copying each one, `_export_enum` reflects over each enum class's
-    members and assigns them directly on `Qt` — the two-line loop below
-    replaces what used to be ~65 lines of `Foo = _FooEnum.Foo` repetition,
-    and any member added to an enum class is picked up automatically.
+    Real enum members are copied on by `_export_enum` (the loop below); any
+    `Qt.<member>` we don't ship falls through `_QtMeta.__getattr__` to a
+    stable placeholder rather than an AttributeError.
     """
 
     # Text interaction (not backed by one of the enums above)
+    NoTextInteraction = 0
     TextSelectableByMouse = 1
     LinksAccessibleByMouse = 2
     TextBrowserInteraction = 3
+    TextEditorInteraction = 0x13
+
+    # Qt6 scoped-enum access: `Qt.AlignmentFlag.AlignLeft` as well as the flat
+    # `Qt.AlignLeft`. Assigned after the export loop below.
 
     class SizePolicy:
         pass
@@ -435,77 +992,317 @@ def _export_enum(namespace: type, enum_cls: type) -> None:
         setattr(namespace, member_name, member)
 
 
-for _enum_cls in (
-    _AlignmentFlag, _Orientation, _CheckState, _ItemFlag, _ScrollBarPolicy,
-    _SortOrder, _WindowType, _ToolButtonStyle, _CursorShape, _Key,
-    _PenStyle, _PenCapStyle, _PenJoinStyle, _BrushStyle, _GlobalColor,
-):
+# (enum class, scoped-access name). The scoped name lets Qt6-style
+# `Qt.AlignmentFlag.AlignLeft` work alongside the flat `Qt.AlignLeft`.
+_QT_ENUMS = [
+    (_AlignmentFlag, "AlignmentFlag"), (_Orientation, "Orientation"),
+    (_CheckState, "CheckState"), (_ItemFlag, "ItemFlag"),
+    (_ScrollBarPolicy, "ScrollBarPolicy"), (_SortOrder, "SortOrder"),
+    (_WindowType, "WindowType"), (_ToolButtonStyle, "ToolButtonStyle"),
+    (_CursorShape, "CursorShape"), (_Key, "Key"),
+    (_PenStyle, "PenStyle"), (_PenCapStyle, "PenCapStyle"),
+    (_PenJoinStyle, "PenJoinStyle"), (_BrushStyle, "BrushStyle"),
+    (_GlobalColor, "GlobalColor"), (_MouseButton, "MouseButton"),
+    (_KeyboardModifier, "KeyboardModifier"), (_ItemDataRole, "ItemDataRole"),
+    (_FocusPolicy, "FocusPolicy"), (_TextFormat, "TextFormat"),
+    (_ContextMenuPolicy, "ContextMenuPolicy"), (_ConnectionType, "ConnectionType"),
+    (_AspectRatioMode, "AspectRatioMode"), (_TransformationMode, "TransformationMode"),
+    (_TextElideMode, "TextElideMode"), (_LayoutDirection, "LayoutDirection"),
+]
+for _enum_cls, _scoped in _QT_ENUMS:
     _export_enum(Qt, _enum_cls)
+    setattr(Qt, _scoped, _enum_cls)
 _export_enum(Qt.SizePolicy, _SizePolicy)
-del _enum_cls
+del _enum_cls, _scoped
 
 # ---------------------------------------------------------------------------
 # Value Types
 # ---------------------------------------------------------------------------
 
-class QSize:
-    def __init__(self, w: int = -1, h: int = -1):
-        self._w = w
-        self._h = h
+class _QSizeBase:
+    _num = int
 
-    def width(self) -> int:
-        return self._w
+    def __init__(self, w=-1, h=-1):
+        if hasattr(w, "width"):  # copy ctor
+            self._w, self._h = self._num(w.width()), self._num(w.height())
+        else:
+            self._w, self._h = self._num(w), self._num(h)
 
-    def height(self) -> int:
-        return self._h
+    def width(self): return self._w
+    def height(self): return self._h
+    def setWidth(self, w): self._w = self._num(w)
+    def setHeight(self, h): self._h = self._num(h)
+    def isNull(self): return self._w == 0 and self._h == 0
+    def isEmpty(self): return self._w <= 0 or self._h <= 0
+    def isValid(self): return self._w >= 0 and self._h >= 0
+    def transposed(self): return type(self)(self._h, self._w)
+    def toTuple(self): return (self._w, self._h)
+    def toSize(self): return QSize(round(self._w), round(self._h))
 
-    def setWidth(self, w: int):
-        self._w = w
+    def boundedTo(self, other):
+        return type(self)(min(self._w, other.width()), min(self._h, other.height()))
 
-    def setHeight(self, h: int):
-        self._h = h
+    def expandedTo(self, other):
+        return type(self)(max(self._w, other.width()), max(self._h, other.height()))
 
-    def toTuple(self):
-        return (self._w, self._h)
+    def scale(self, w, h=None, mode=None):
+        pass  # aspect-ratio scaling: rarely needed for layout math here
 
+    def __add__(self, o): return type(self)(self._w + o.width(), self._h + o.height())
+    def __sub__(self, o): return type(self)(self._w - o.width(), self._h - o.height())
+    def __mul__(self, f): return type(self)(self._w * f, self._h * f)
+    __rmul__ = __mul__
+    def __eq__(self, o): return hasattr(o, "width") and (self._w, self._h) == (o.width(), o.height())
+    def __hash__(self): return hash((type(self).__name__, self._w, self._h))
+    def __repr__(self): return f"{type(self).__name__}({self._w}, {self._h})"
+
+
+class QSize(_QSizeBase):
+    _num = int
+
+
+class QSizeF(_QSizeBase):
+    _num = float
+
+
+class _QPointBase:
+    _num = int
+
+    def __init__(self, x=0, y=0):
+        if hasattr(x, "x"):  # copy ctor
+            self._x, self._y = self._num(x.x()), self._num(x.y())
+        else:
+            self._x, self._y = self._num(x), self._num(y)
+
+    def x(self): return self._x
+    def y(self): return self._y
+    def setX(self, x): self._x = self._num(x)
+    def setY(self, y): self._y = self._num(y)
+    def isNull(self): return self._x == 0 and self._y == 0
+    def manhattanLength(self): return abs(self._x) + abs(self._y)
+    def toTuple(self): return (self._x, self._y)
+    def toPoint(self): return QPoint(round(self._x), round(self._y))
+    def transposed(self): return type(self)(self._y, self._x)
+    def dotProduct(self, o): return self._x * o.x() + self._y * o.y()
+
+    def __add__(self, o): return type(self)(self._x + o.x(), self._y + o.y())
+    def __sub__(self, o): return type(self)(self._x - o.x(), self._y - o.y())
+    def __mul__(self, f): return type(self)(self._x * f, self._y * f)
+    __rmul__ = __mul__
+    def __truediv__(self, f): return type(self)(self._x / f, self._y / f)
+    def __neg__(self): return type(self)(-self._x, -self._y)
+    def __eq__(self, o): return hasattr(o, "x") and (self._x, self._y) == (o.x(), o.y())
+    def __hash__(self): return hash((type(self).__name__, self._x, self._y))
+    def __repr__(self): return f"{type(self).__name__}({self._x}, {self._y})"
+
+
+class QPoint(_QPointBase):
+    _num = int
+
+
+class QPointF(_QPointBase):
+    _num = float
+
+
+class _QRectBase:
+    _num = int
+    _point = None   # set below
+    _size = None
+
+    def __init__(self, *args):
+        if len(args) == 2 and hasattr(args[0], "x") and hasattr(args[1], "width"):
+            p, s = args
+            self._x, self._y, self._w, self._h = p.x(), p.y(), s.width(), s.height()
+        elif len(args) == 2 and hasattr(args[0], "x") and hasattr(args[1], "x"):
+            p1, p2 = args
+            self._x, self._y = p1.x(), p1.y()
+            self._w, self._h = p2.x() - p1.x(), p2.y() - p1.y()
+        elif len(args) == 1 and hasattr(args[0], "x"):
+            r = args[0]
+            self._x, self._y, self._w, self._h = r.x(), r.y(), r.width(), r.height()
+        elif len(args) == 4:
+            self._x, self._y, self._w, self._h = args
+        else:
+            self._x = self._y = self._w = self._h = 0
+        n = self._num
+        self._x, self._y, self._w, self._h = n(self._x), n(self._y), n(self._w), n(self._h)
+
+    def x(self): return self._x
+    def y(self): return self._y
+    def width(self): return self._w
+    def height(self): return self._h
+    def left(self): return self._x
+    def top(self): return self._y
+    def right(self): return self._x + self._w - (1 if self._num is int else 0)
+    def bottom(self): return self._y + self._h - (1 if self._num is int else 0)
+    def setX(self, v): self._x = self._num(v)
+    def setY(self, v): self._y = self._num(v)
+    def setWidth(self, v): self._w = self._num(v)
+    def setHeight(self, v): self._h = self._num(v)
+    def setRect(self, x, y, w, h):
+        self._x, self._y, self._w, self._h = x, y, w, h
+
+    def setLeft(self, v):
+        self._w += self._x - v
+        self._x = v
+
+    def setTop(self, v):
+        self._h += self._y - v
+        self._y = v
+
+    def setRight(self, v):
+        self._w = v - self._x
+
+    def setBottom(self, v):
+        self._h = v - self._y
+
+    def topLeft(self): return self._point(self._x, self._y)
+    def topRight(self): return self._point(self.right(), self._y)
+    def bottomLeft(self): return self._point(self._x, self.bottom())
+    def bottomRight(self): return self._point(self.right(), self.bottom())
+    def center(self): return self._point(self._x + self._w / 2, self._y + self._h / 2)
+    def size(self): return self._size(self._w, self._h)
+
+    def moveTo(self, x, y=None):
+        if y is None:
+            x, y = x.x(), x.y()
+        self._x, self._y = x, y
+
+    def moveCenter(self, p):
+        self._x = p.x() - self._w / 2
+        self._y = p.y() - self._h / 2
+
+    def translate(self, dx, dy=None):
+        if dy is None:
+            dx, dy = dx.x(), dx.y()
+        self._x += dx
+        self._y += dy
+
+    def translated(self, dx, dy=None):
+        r = type(self)(self)
+        r.translate(dx, dy)
+        return r
+
+    def adjusted(self, dx1, dy1, dx2, dy2):
+        return type(self)(self._x + dx1, self._y + dy1,
+                          self._w - dx1 + dx2, self._h - dy1 + dy2)
+
+    def adjust(self, dx1, dy1, dx2, dy2):
+        self._x += dx1
+        self._y += dy1
+        self._w += dx2 - dx1
+        self._h += dy2 - dy1
+
+    def marginsRemoved(self, m):
+        return type(self)(self._x + m.left(), self._y + m.top(),
+                          self._w - m.left() - m.right(),
+                          self._h - m.top() - m.bottom())
+
+    def contains(self, *args):
+        if len(args) == 1 and hasattr(args[0], "width"):
+            r = args[0]
+            return (r.left() >= self.left() and r.right() <= self.right()
+                    and r.top() >= self.top() and r.bottom() <= self.bottom())
+        px, py = (args[0].x(), args[0].y()) if len(args) == 1 else (args[0], args[1])
+        return self._x <= px <= self._x + self._w and self._y <= py <= self._y + self._h
+
+    def intersects(self, r):
+        return not (r.left() > self.right() or r.right() < self.left()
+                    or r.top() > self.bottom() or r.bottom() < self.top())
+
+    def intersected(self, r):
+        x1, y1 = max(self.left(), r.left()), max(self.top(), r.top())
+        x2, y2 = min(self.right(), r.right()), min(self.bottom(), r.bottom())
+        return type(self)(x1, y1, max(0, x2 - x1), max(0, y2 - y1))
+
+    def united(self, r):
+        x1, y1 = min(self.left(), r.left()), min(self.top(), r.top())
+        x2, y2 = max(self.right(), r.right()), max(self.bottom(), r.bottom())
+        return type(self)(x1, y1, x2 - x1, y2 - y1)
+
+    def normalized(self):
+        x, y, w, h = self._x, self._y, self._w, self._h
+        if w < 0:
+            x, w = x + w, -w
+        if h < 0:
+            y, h = y + h, -h
+        return type(self)(x, y, w, h)
+
+    def isNull(self): return self._w == 0 and self._h == 0
+    def isEmpty(self): return self._w <= 0 or self._h <= 0
+    def isValid(self): return self._w > 0 and self._h > 0
+    def getRect(self): return (self._x, self._y, self._w, self._h)
+    def toRect(self): return QRect(round(self._x), round(self._y), round(self._w), round(self._h))
+    def toTuple(self): return (self._x, self._y, self._w, self._h)
+
+    def __and__(self, r): return self.intersected(r)
+    def __or__(self, r): return self.united(r)
+    def __eq__(self, o):
+        return (hasattr(o, "width")
+                and (self._x, self._y, self._w, self._h)
+                == (o.x(), o.y(), o.width(), o.height()))
+    def __hash__(self): return hash((type(self).__name__, self._x, self._y, self._w, self._h))
     def __repr__(self):
-        return f"QSize({self._w}, {self._h})"
+        return f"{type(self).__name__}({self._x}, {self._y}, {self._w}, {self._h})"
 
-class QPoint:
-    def __init__(self, x: int = 0, y: int = 0):
-        self._x = x
-        self._y = y
 
-    def x(self) -> int:
-        return self._x
+class QRect(_QRectBase):
+    _num = int
+    _point = QPoint
+    _size = QSize
 
-    def y(self) -> int:
-        return self._y
 
+class QRectF(_QRectBase):
+    _num = float
+    _point = QPointF
+    _size = QSizeF
+
+
+class _QLineBase:
+    _point = QPoint
+
+    def __init__(self, *args):
+        if len(args) == 2 and hasattr(args[0], "x"):
+            self._x1, self._y1 = args[0].x(), args[0].y()
+            self._x2, self._y2 = args[1].x(), args[1].y()
+        elif len(args) == 4:
+            self._x1, self._y1, self._x2, self._y2 = args
+        else:
+            self._x1 = self._y1 = self._x2 = self._y2 = 0
+
+    def x1(self): return self._x1
+    def y1(self): return self._y1
+    def x2(self): return self._x2
+    def y2(self): return self._y2
+    def p1(self): return self._point(self._x1, self._y1)
+    def p2(self): return self._point(self._x2, self._y2)
+    def dx(self): return self._x2 - self._x1
+    def dy(self): return self._y2 - self._y1
+    def length(self):
+        return (self.dx() ** 2 + self.dy() ** 2) ** 0.5
+    def center(self):
+        return self._point((self._x1 + self._x2) / 2, (self._y1 + self._y2) / 2)
+    def isNull(self):
+        return self._x1 == self._x2 and self._y1 == self._y2
+    def translated(self, dx, dy=None):
+        if dy is None:
+            dx, dy = dx.x(), dx.y()
+        return type(self)(self._x1 + dx, self._y1 + dy, self._x2 + dx, self._y2 + dy)
+    def __eq__(self, o):
+        return (isinstance(o, _QLineBase)
+                and (self._x1, self._y1, self._x2, self._y2)
+                == (o.x1(), o.y1(), o.x2(), o.y2()))
+    def __hash__(self): return hash((type(self).__name__, self._x1, self._y1, self._x2, self._y2))
     def __repr__(self):
-        return f"QPoint({self._x}, {self._y})"
+        return f"{type(self).__name__}({self._x1}, {self._y1}, {self._x2}, {self._y2})"
 
-class QRect:
-    def __init__(self, x: int = 0, y: int = 0, w: int = 0, h: int = 0):
-        self._x = x
-        self._y = y
-        self._w = w
-        self._h = h
 
-    def x(self) -> int:
-        return self._x
+class QLine(_QLineBase):
+    _point = QPoint
 
-    def y(self) -> int:
-        return self._y
 
-    def width(self) -> int:
-        return self._w
-
-    def height(self) -> int:
-        return self._h
-
-    def __repr__(self):
-        return f"QRect({self._x}, {self._y}, {self._w}, {self._h})"
+class QLineF(_QLineBase):
+    _point = QPointF
 
 # Qt.GlobalColor value -> (r, g, b, a). Mirrors Qt's predefined colours so
 # `QColor(Qt.red)`, `painter.setPen(Qt.blue)`, etc. resolve to real pixels.
@@ -533,59 +1330,227 @@ _GLOBAL_COLOR_RGB: dict[int, tuple[int, int, int, int]] = {
 }
 
 
+# CSS/SVG named colours -> (r, g, b). Lets QColor("steelblue").red() be right,
+# which real Qt paint code depends on.
+_CSS_COLORS: dict[str, tuple[int, int, int]] = {
+    "aliceblue": (240, 248, 255), "antiquewhite": (250, 235, 215), "aqua": (0, 255, 255),
+    "aquamarine": (127, 255, 212), "azure": (240, 255, 255), "beige": (245, 245, 220),
+    "bisque": (255, 228, 196), "black": (0, 0, 0), "blanchedalmond": (255, 235, 205),
+    "blue": (0, 0, 255), "blueviolet": (138, 43, 226), "brown": (165, 42, 42),
+    "burlywood": (222, 184, 135), "cadetblue": (95, 158, 160), "chartreuse": (127, 255, 0),
+    "chocolate": (210, 105, 30), "coral": (255, 127, 80), "cornflowerblue": (100, 149, 237),
+    "cornsilk": (255, 248, 220), "crimson": (220, 20, 60), "cyan": (0, 255, 255),
+    "darkblue": (0, 0, 139), "darkcyan": (0, 139, 139), "darkgoldenrod": (184, 134, 11),
+    "darkgray": (169, 169, 169), "darkgreen": (0, 100, 0), "darkgrey": (169, 169, 169),
+    "darkkhaki": (189, 183, 107), "darkmagenta": (139, 0, 139), "darkolivegreen": (85, 107, 47),
+    "darkorange": (255, 140, 0), "darkorchid": (153, 50, 204), "darkred": (139, 0, 0),
+    "darksalmon": (233, 150, 122), "darkseagreen": (143, 188, 143), "darkslateblue": (72, 61, 139),
+    "darkslategray": (47, 79, 79), "darkslategrey": (47, 79, 79), "darkturquoise": (0, 206, 209),
+    "darkviolet": (148, 0, 211), "deeppink": (255, 20, 147), "deepskyblue": (0, 191, 255),
+    "dimgray": (105, 105, 105), "dimgrey": (105, 105, 105), "dodgerblue": (30, 144, 255),
+    "firebrick": (178, 34, 34), "floralwhite": (255, 250, 240), "forestgreen": (34, 139, 34),
+    "fuchsia": (255, 0, 255), "gainsboro": (220, 220, 220), "ghostwhite": (248, 248, 255),
+    "gold": (255, 215, 0), "goldenrod": (218, 165, 32), "gray": (128, 128, 128),
+    "green": (0, 128, 0), "greenyellow": (173, 255, 47), "grey": (128, 128, 128),
+    "honeydew": (240, 255, 240), "hotpink": (255, 105, 180), "indianred": (205, 92, 92),
+    "indigo": (75, 0, 130), "ivory": (255, 255, 240), "khaki": (240, 230, 140),
+    "lavender": (230, 230, 250), "lavenderblush": (255, 240, 245), "lawngreen": (124, 252, 0),
+    "lemonchiffon": (255, 250, 205), "lightblue": (173, 216, 230), "lightcoral": (240, 128, 128),
+    "lightcyan": (224, 255, 255), "lightgoldenrodyellow": (250, 250, 210), "lightgray": (211, 211, 211),
+    "lightgreen": (144, 238, 144), "lightgrey": (211, 211, 211), "lightpink": (255, 182, 193),
+    "lightsalmon": (255, 160, 122), "lightseagreen": (32, 178, 170), "lightskyblue": (135, 206, 250),
+    "lightslategray": (119, 136, 153), "lightslategrey": (119, 136, 153), "lightsteelblue": (176, 196, 222),
+    "lightyellow": (255, 255, 224), "lime": (0, 255, 0), "limegreen": (50, 205, 50),
+    "linen": (250, 240, 230), "magenta": (255, 0, 255), "maroon": (128, 0, 0),
+    "mediumaquamarine": (102, 205, 170), "mediumblue": (0, 0, 205), "mediumorchid": (186, 85, 211),
+    "mediumpurple": (147, 112, 219), "mediumseagreen": (60, 179, 113), "mediumslateblue": (123, 104, 238),
+    "mediumspringgreen": (0, 250, 154), "mediumturquoise": (72, 209, 204), "mediumvioletred": (199, 21, 133),
+    "midnightblue": (25, 25, 112), "mintcream": (245, 255, 250), "mistyrose": (255, 228, 225),
+    "moccasin": (255, 228, 181), "navajowhite": (255, 222, 173), "navy": (0, 0, 128),
+    "oldlace": (253, 245, 230), "olive": (128, 128, 0), "olivedrab": (107, 142, 35),
+    "orange": (255, 165, 0), "orangered": (255, 69, 0), "orchid": (218, 112, 214),
+    "palegoldenrod": (238, 232, 170), "palegreen": (152, 251, 152), "paleturquoise": (175, 238, 238),
+    "palevioletred": (219, 112, 147), "papayawhip": (255, 239, 213), "peachpuff": (255, 218, 185),
+    "peru": (205, 133, 63), "pink": (255, 192, 203), "plum": (221, 160, 221),
+    "powderblue": (176, 224, 230), "purple": (128, 0, 128), "rebeccapurple": (102, 51, 153),
+    "red": (255, 0, 0), "rosybrown": (188, 143, 143), "royalblue": (65, 105, 225),
+    "saddlebrown": (139, 69, 19), "salmon": (250, 128, 114), "sandybrown": (244, 164, 96),
+    "seagreen": (46, 139, 87), "seashell": (255, 245, 238), "sienna": (160, 82, 45),
+    "silver": (192, 192, 192), "skyblue": (135, 206, 235), "slateblue": (106, 90, 205),
+    "slategray": (112, 128, 144), "slategrey": (112, 128, 144), "snow": (255, 250, 250),
+    "springgreen": (0, 255, 127), "steelblue": (70, 130, 180), "tan": (210, 180, 140),
+    "teal": (0, 128, 128), "thistle": (216, 191, 216), "tomato": (255, 99, 71),
+    "turquoise": (64, 224, 208), "violet": (238, 130, 238), "wheat": (245, 222, 179),
+    "white": (255, 255, 255), "whitesmoke": (245, 245, 245), "yellow": (255, 255, 0),
+    "yellowgreen": (154, 205, 50),
+}
+
+
+def _parse_color_string(s: str) -> tuple[int, int, int, int] | None:
+    """('#rgb' | '#rrggbb' | '#rrggbbaa' | '#aarrggbb' | name) -> (r,g,b,a)."""
+    s = s.strip()
+    key = s.lower()
+    if key in _CSS_COLORS:
+        r, g, b = _CSS_COLORS[key]
+        return r, g, b, 255
+    if key in ("transparent",):
+        return 0, 0, 0, 0
+    if s.startswith("#"):
+        h = s[1:]
+        if len(h) == 3:
+            return tuple(int(c * 2, 16) for c in h) + (255,)  # type: ignore[return-value]
+        if len(h) == 6:
+            return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 255
+        if len(h) == 8:  # Qt's #AARRGGBB
+            return int(h[2:4], 16), int(h[4:6], 16), int(h[6:8], 16), int(h[0:2], 16)
+    return None
+
+
 class QColor:
+    HexRgb = 0
+    HexArgb = 1
+
     def __init__(self, *args):
         self._r = self._g = self._b = 0
         self._a = 255
-        self._name = "#000000"
-        if len(args) == 1 and isinstance(args[0], QColor):
+        self._valid = True
+        if not args:
+            self._valid = False
+        elif len(args) == 1 and isinstance(args[0], QColor):
             src = args[0]
             self._r, self._g, self._b, self._a = src._r, src._g, src._b, src._a
-            self._name = src._name
-        elif len(args) == 1 and isinstance(args[0], str):
-            self._name = args[0]
-            self._r = self._g = self._b = self._a = 0
-        elif len(args) == 1 and isinstance(args[0], (int, _GlobalColor)):
+            self._valid = src._valid
+        elif len(args) == 1 and isinstance(args[0], _GlobalColor):
             self._r, self._g, self._b, self._a = _GLOBAL_COLOR_RGB.get(
-                int(args[0]), (0, 0, 0, 255)
-            )
-            self._name = self._rgba_str()
+                int(args[0]), (0, 0, 0, 255))
+        elif len(args) == 1 and isinstance(args[0], str):
+            parsed = _parse_color_string(args[0])
+            if parsed is None:
+                self._valid = False
+            else:
+                self._r, self._g, self._b, self._a = parsed
+        elif len(args) == 1 and isinstance(args[0], int):
+            v = args[0]  # QRgb: 0xAARRGGBB, alpha forced opaque (Qt behaviour)
+            self._r, self._g, self._b = (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF
         elif len(args) >= 3:
-            self._r, self._g, self._b = args[0], args[1], args[2]
-            self._a = args[3] if len(args) > 3 else 255
-            self._name = self._rgba_str()
+            self._r, self._g, self._b = (int(args[0]), int(args[1]), int(args[2]))
+            self._a = int(args[3]) if len(args) > 3 else 255
 
-    def _rgba_str(self) -> str:
-        return f"rgba({self._r},{self._g},{self._b},{self._a / 255:.3f})"
+    # -- construction helpers --
+    @staticmethod
+    def fromRgb(r, g, b, a=255):
+        return QColor(r, g, b, a)
 
-    def name(self) -> str:
-        return self._name
+    @staticmethod
+    def fromRgbF(r, g, b, a=1.0):
+        return QColor(round(r * 255), round(g * 255), round(b * 255), round(a * 255))
 
+    @staticmethod
+    def fromHsv(h, s, v, a=255):
+        c = QColor()
+        c.setHsv(h, s, v, a)
+        return c
+
+    # -- channel access --
     def red(self) -> int: return self._r
     def green(self) -> int: return self._g
     def blue(self) -> int: return self._b
     def alpha(self) -> int: return self._a
+    def redF(self) -> float: return self._r / 255
+    def greenF(self) -> float: return self._g / 255
+    def blueF(self) -> float: return self._b / 255
+    def alphaF(self) -> float: return self._a / 255
+
+    def getRgb(self):
+        return (self._r, self._g, self._b, self._a)
+
+    def getRgbF(self):
+        return (self._r / 255, self._g / 255, self._b / 255, self._a / 255)
+
+    def rgb(self) -> int:
+        return (0xFF << 24) | (self._r << 16) | (self._g << 8) | self._b
+
+    def rgba(self) -> int:
+        return (self._a << 24) | (self._r << 16) | (self._g << 8) | self._b
+
+    def setRed(self, v): self._r = int(v)
+    def setGreen(self, v): self._g = int(v)
+    def setBlue(self, v): self._b = int(v)
 
     def setAlpha(self, a: int):
-        self._a = a
-        if not (len(self._name) and self._name[0] == "#"):
-            self._name = self._rgba_str()
+        self._a = int(a)
 
-    def isValid(self) -> bool:
-        return True
+    def setAlphaF(self, a: float):
+        self._a = round(a * 255)
+
+    def setRgb(self, r, g, b, a=255):
+        self._r, self._g, self._b, self._a = int(r), int(g), int(b), int(a)
+        self._valid = True
+
+    def setNamedColor(self, name: str):
+        parsed = _parse_color_string(name)
+        if parsed is not None:
+            self._r, self._g, self._b, self._a = parsed
+            self._valid = True
+
+    def setHsv(self, h, s, v, a=255):
+        import colorsys
+        h = (h % 360) / 360.0 if h >= 0 else 0.0
+        r, g, b = colorsys.hsv_to_rgb(h, s / 255.0, v / 255.0)
+        self._r, self._g, self._b, self._a = (
+            round(r * 255), round(g * 255), round(b * 255), int(a))
+        self._valid = True
+
+    def getHsv(self):
+        import colorsys
+        h, s, v = colorsys.rgb_to_hsv(self._r / 255, self._g / 255, self._b / 255)
+        return (round(h * 360), round(s * 255), round(v * 255), self._a)
+
+    def hue(self): return self.getHsv()[0]
+    def saturation(self): return self.getHsv()[1]
+    def value(self): return self.getHsv()[2]
+
+    def toHsv(self):
+        return QColor.fromHsv(*self.getHsv())
+
+    def toRgb(self):
+        return QColor(self)
+
+    # -- derived colours --
+    def lighter(self, factor: int = 150):
+        h, s, v, a = self.getHsv()
+        return QColor.fromHsv(h, s, min(255, round(v * factor / 100)), a)
+
+    def darker(self, factor: int = 200):
+        h, s, v, a = self.getHsv()
+        return QColor.fromHsv(h, s, round(v * 100 / factor), a)
+
+    # -- names --
+    def name(self, fmt: int = 0) -> str:
+        if fmt == QColor.HexArgb:
+            return f"#{self._a:02x}{self._r:02x}{self._g:02x}{self._b:02x}"
+        return f"#{self._r:02x}{self._g:02x}{self._b:02x}"
+
+    def _rgba_str(self) -> str:
+        return f"rgba({self._r},{self._g},{self._b},{self._a / 255:.3f})"
 
     def to_css(self) -> str:
         """A CSS colour string usable anywhere (canvas fillStyle, style attr)."""
-        return self._name
+        return self.name() if self._a >= 255 else self._rgba_str()
+
+    def isValid(self) -> bool:
+        return self._valid
 
     def __eq__(self, other):
-        return isinstance(other, QColor) and other._name == self._name
+        return (isinstance(other, QColor)
+                and (self._r, self._g, self._b, self._a)
+                == (other._r, other._g, other._b, other._a))
 
     def __hash__(self):
-        return hash(self._name)
+        return hash((self._r, self._g, self._b, self._a))
 
     def __repr__(self):
-        return f"QColor('{self._name}')"
+        return f"QColor({self._r}, {self._g}, {self._b}, {self._a})"
 
 class QFont:
     family = Prop("")
@@ -644,26 +1609,8 @@ class QIcon:
     def __repr__(self):
         return f"QIcon('{self._text}')"
 
-class QPixmap:
-    """Minimal QPixmap stub."""
-    def __init__(self, *args):
-        self._width = 0
-        self._height = 0
-        if len(args) == 2:
-            self._width = args[0]
-            self._height = args[1]
-
-    def width(self) -> int:
-        return self._width
-
-    def height(self) -> int:
-        return self._height
-
-    def isNull(self) -> bool:
-        return self._width == 0 and self._height == 0
-
-    def scaled(self, *args, **kwargs):
-        return self
+# QPixmap lives in painting.py now (it reads a file into a data: URL); the
+# interceptor exports painting.QPixmap as QtGui.QPixmap.
 
 class QMargins:
     def __init__(self, left: int = 0, top: int = 0, right: int = 0, bottom: int = 0):
@@ -681,12 +1628,13 @@ class QMargins:
 # QTimer
 # ---------------------------------------------------------------------------
 
-class QTimer:
+class QTimer(QObject):
     """Virtual QTimer using threading."""
 
     timeout = Signal()
 
     def __init__(self, parent=None):
+        super().__init__(parent)
         self._interval = 0
         self._single_shot = False
         self._running = False
