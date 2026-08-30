@@ -130,6 +130,7 @@ until PySideWeb implements it. If you hit something you'd like supported for rea
 | `PYSIDEWEB_PORT`     | `8765`       | Port for the HTTP and WebSocket server |
 | `PYSIDEWEB_HOST`     | `127.0.0.1`  | Interface to bind to. The `/ws` endpoint has no authentication, so anything that can reach it can inspect and drive your app's UI — only set this to `0.0.0.0` (or a specific LAN address) if you intend to open the app to other devices on your network, and understand that anyone on that network can then control it. |
 | `PYSIDEWEB_STRICT`  | unset        | When set, any call to a Qt method/class PySideWeb doesn't implement raises `AttributeError` instead of degrading to a no-op, and slot exceptions propagate. Useful while porting an app — turn it off for the graceful-degradation behaviour. |
+| `PYSIDEWEB_NO_BROWSER` | unset     | When set, `app.exec()` doesn't open a browser tab. Handy for the edit-run loop when you already have the page open. |
 
 ## Examples
 

@@ -1773,6 +1773,22 @@ class QApplication(QObject):
         self._quit_on_last_window_closed = True
         self._exit_code = 0
         self._quit_event = threading.Event()
+        self._server_port = int(os.environ.get("PYSIDEWEB_PORT", "8765"))
+        # Warm up the web server now (importing aiohttp is ~300 ms, plus the
+        # bind) on a throwaway thread, so it overlaps with the user building
+        # their widget tree instead of all landing on exec(). Skipped under
+        # pytest, where nothing calls exec() and a bound socket is just noise.
+        if "pytest" not in sys.modules:
+            threading.Thread(
+                target=self._boot_server, daemon=True, name="pysideweb-boot"
+            ).start()
+
+    def _boot_server(self):
+        try:
+            from . import server as srv
+            srv.start_server(self._server_port)
+        except Exception:  # noqa: BLE001 - exec() will surface a real error
+            pass
 
     @staticmethod
     def instance():
@@ -1789,15 +1805,21 @@ class QApplication(QObject):
 
     def exec_(self) -> int:
         from . import server as srv
-        port = int(os.environ.get("PYSIDEWEB_PORT", "8765"))
-        srv.ensure_server_running(port)
+        port = self._server_port
+        srv.start_server(port)      # no-op if _boot_server already did it
+        ok = srv.wait_for_server()
 
         url = f"http://localhost:{port}"
-        print(f"\n{'=' * 50}")
-        print(f"  PySideWeb running at: {url}")
-        print("  Press Ctrl+C to quit")
-        print(f"{'=' * 50}\n")
-        webbrowser.open(url)
+        if ok:
+            print(f"\n{'=' * 50}")
+            print(f"  PySideWeb running at: {url}")
+            print("  Press Ctrl+C to quit")
+            print(f"{'=' * 50}\n")
+            if not os.environ.get("PYSIDEWEB_NO_BROWSER"):
+                webbrowser.open(url)
+        else:
+            print("[PySideWeb] the UI is NOT being served (see the error above). "
+                  "Ctrl+C to exit.")
 
         try:
             self._quit_event.wait()
