@@ -130,7 +130,7 @@ class TestGeometryTypes:
 
     def test_rect_geometry(self):
         r = QRect(0, 0, 10, 20)
-        assert r.center() == QPoint(5, 10)
+        assert r.center() == QPoint(4, 9)  # Qt: inclusive right/bottom
         assert r.adjusted(1, 1, -1, -1).getRect() == (1, 1, 8, 18)
         assert r.contains(QPoint(5, 5)) and not r.contains(QPoint(50, 50))
         assert r.translated(5, 5).topLeft() == QPoint(5, 5)
