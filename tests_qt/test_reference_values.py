@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("PySide6", reason="real PySide6 not installed")
 
-from PySide6.QtCore import QLine, QPoint, QPointF, QRect, QRectF, QSize, Qt  # noqa: E402
+from PySide6.QtCore import QLineF, QPoint, QPointF, QRect, QRectF, QSize, Qt  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
 
 
@@ -33,20 +33,21 @@ def test_geometry():
     assert (QPointF(1.5, 2.5) + QPointF(0.5, 0.5)).x() == 2.0
     assert (QPoint(3, -4)).manhattanLength() == 7
     r = QRect(0, 0, 10, 20)
-    assert (r.center().x(), r.center().y()) == (5, 10)
+    assert (r.center().x(), r.center().y()) == (4, 9)
     assert r.adjusted(1, 1, -1, -1).getRect() == (1, 1, 8, 18)
     a, b = QRect(0, 0, 10, 10), QRect(5, 5, 10, 10)
     assert a.intersected(b).getRect() == (5, 5, 5, 5)
     assert a.united(b).getRect() == (0, 0, 15, 15)
     assert QRectF(0.0, 0.0, 3.0, 4.0).center().y() == 2.0
     assert QSize(4, 9).boundedTo(QSize(6, 3)).toTuple() == (4, 3)
-    assert QLine(0, 0, 3, 4).length() == 5.0
+    assert QLineF(0, 0, 3, 4).length() == 5.0
 
 
 def test_enums():
-    assert int(Qt.Key.Key_F5) == 0x01000034
-    assert int(Qt.Key.Key_Left) == 0x01000012
-    assert int(Qt.ItemDataRole.DisplayRole) == 0
-    assert int(Qt.ItemDataRole.UserRole) == 256
-    assert int(Qt.FocusPolicy.StrongFocus) == 11
-    assert int(Qt.KeyboardModifier.ControlModifier) == 0x04000000
+    # PySide6's Qt6 enums are Python enum.Enum/Flag; use .value, not int().
+    assert Qt.Key.Key_F5.value == 0x01000034
+    assert Qt.Key.Key_Left.value == 0x01000012
+    assert Qt.ItemDataRole.DisplayRole.value == 0
+    assert Qt.ItemDataRole.UserRole.value == 256
+    assert Qt.FocusPolicy.StrongFocus.value == 11
+    assert Qt.KeyboardModifier.ControlModifier.value == 0x04000000

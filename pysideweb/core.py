@@ -1180,7 +1180,11 @@ class _QRectBase:
     def topRight(self): return self._point(self.right(), self._y)
     def bottomLeft(self): return self._point(self._x, self.bottom())
     def bottomRight(self): return self._point(self.right(), self.bottom())
-    def center(self): return self._point(self._x + self._w / 2, self._y + self._h / 2)
+    def center(self):
+        if self._num is int:
+            # Qt: QPoint(x1 + (x2 - x1)/2, ...) with x2 = x1 + w - 1 (inclusive).
+            return self._point(self._x + (self._w - 1) // 2, self._y + (self._h - 1) // 2)
+        return self._point(self._x + self._w / 2, self._y + self._h / 2)
     def size(self): return self._size(self._w, self._h)
 
     def moveTo(self, x, y=None):
