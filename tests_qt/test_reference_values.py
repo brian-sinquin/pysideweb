@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("PySide6", reason="real PySide6 not installed")
 
-from PySide6.QtCore import QLine, QPoint, QPointF, QRect, QRectF, QSize, Qt  # noqa: E402
+from PySide6.QtCore import QLineF, QPoint, QPointF, QRect, QRectF, QSize, Qt  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
 
 
@@ -40,7 +40,7 @@ def test_geometry():
     assert a.united(b).getRect() == (0, 0, 15, 15)
     assert QRectF(0.0, 0.0, 3.0, 4.0).center().y() == 2.0
     assert QSize(4, 9).boundedTo(QSize(6, 3)).toTuple() == (4, 3)
-    assert QLine(0, 0, 3, 4).length() == 5.0
+    assert QLineF(0, 0, 3, 4).length() == 5.0
 
 
 def test_enums():
