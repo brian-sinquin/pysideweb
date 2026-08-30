@@ -18,16 +18,20 @@ from . import core, layouts, painting, widgets
 
 
 def _public_classes(module: types.ModuleType) -> dict[str, type]:
-    """Every `Q*`-named class *defined in* `module` (not merely imported into it).
+    """Every `Q*`-named class *defined in* `module` or one of its submodules
+    (not merely imported into it from elsewhere).
 
-    Adding a new widget or layout class to `widgets.py`/`layouts.py` is then
-    enough on its own to expose it through the fake `PySide6` package — this
-    reflects over the module's own namespace instead of hand-maintaining a
-    name list here that has to be kept in sync by hand on every addition.
+    Adding a new class to `widgets/` or `layouts.py` is then enough on its own
+    to expose it through the fake `PySide6` package -- this reflects over the
+    namespace instead of a hand-maintained list. Works for a plain module
+    (`layouts`) and a package (`widgets`, whose classes live in
+    `pysideweb.widgets.<submodule>`).
     """
+    pkg = module.__name__
     return {
         name: obj for name, obj in vars(module).items()
-        if isinstance(obj, type) and obj.__module__ == module.__name__ and name.startswith("Q")
+        if isinstance(obj, type) and name.startswith("Q")
+        and (obj.__module__ == pkg or obj.__module__.startswith(pkg + "."))
     }
 
 

@@ -65,11 +65,18 @@ the widget's subtree (`[data-wid="wN"] …`): pseudo-states (`:pressed` → `:ac
 sub-controls (`::item`, `::chunk`), Qt-only properties dropped. The renderer just injects
 the result as a `<style>` element. A bare declaration list is applied inline instead.
 
-### `widgets.py` / `layouts.py`
-Virtual widget and layout classes. Each widget has:
+### `widgets/` / `layouts.py`
+Virtual widget and layout classes. `widgets/` is a package — `base` (QWidget),
+`controls` (buttons, inputs, sliders), `views` (list/table/tree), `containers`
+(windows, tabs, dialogs), `chrome` (menus, toolbar, status bar), `misc` — all
+re-exported from `widgets/__init__.py`. Each widget has:
 - `_widget_type` — the string the renderer switches on.
 - `_get_props()` — returns a JSON-serializable dict of visual state.
 - `_handle_event(type, value)` — applies a browser event and emits the matching signal.
+
+The interceptor discovers widget classes by reflecting over the package (any
+`Q*` class defined in `pysideweb.widgets.*`), so adding one to a submodule is
+enough to expose it through the fake `PySide6.QtWidgets`.
 
 ### `painting.py`
 The virtual `QPainter` pipeline. A `QWidget` subclass that overrides `paintEvent`
