@@ -496,11 +496,13 @@ class QUrl:
         return self._url.split(":", 1)[0] if ":" in self._url else ""
 
     def toLocalFile(self) -> str:
-        return self._url[8:] if self._url.startswith("file:///") else self._url
+        return self._url[7:] if self._url.startswith("file://") else self._url
 
     @staticmethod
     def fromLocalFile(path: str) -> QUrl:
-        return QUrl(f"file:///{path.lstrip('/')}")
+        if not path.startswith("/"):
+            path = "/" + path
+        return QUrl(f"file://{path}")
 
     def __str__(self) -> str:
         return self._url
@@ -1229,14 +1231,18 @@ class _QRectBase:
                     or r.top() > self.bottom() or r.bottom() < self.top())
 
     def intersected(self, r):
+        edge = 1 if self._num is int else 0  # right()/bottom() are inclusive for QRect
         x1, y1 = max(self.left(), r.left()), max(self.top(), r.top())
         x2, y2 = min(self.right(), r.right()), min(self.bottom(), r.bottom())
-        return type(self)(x1, y1, max(0, x2 - x1), max(0, y2 - y1))
+        if x2 < x1 or y2 < y1:
+            return type(self)(x1, y1, 0, 0)
+        return type(self)(x1, y1, x2 - x1 + edge, y2 - y1 + edge)
 
     def united(self, r):
+        edge = 1 if self._num is int else 0
         x1, y1 = min(self.left(), r.left()), min(self.top(), r.top())
         x2, y2 = max(self.right(), r.right()), max(self.bottom(), r.bottom())
-        return type(self)(x1, y1, x2 - x1, y2 - y1)
+        return type(self)(x1, y1, x2 - x1 + edge, y2 - y1 + edge)
 
     def normalized(self):
         x, y, w, h = self._x, self._y, self._w, self._h

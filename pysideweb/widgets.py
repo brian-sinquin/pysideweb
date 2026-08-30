@@ -1663,13 +1663,21 @@ class QAction(QObject):
     checked = Prop(False, getter="isChecked")
 
     def __init__(self, *args, parent=None):
+        # Qt overloads: QAction(parent) | QAction(text[, parent])
+        #             | QAction(icon, text[, parent])
         self._props: dict = {name: p.default for name, p in self._declared_props.items()}
+        icon = QIcon()
+        text = ""
+        rest = list(args)
+        if rest and isinstance(rest[0], QIcon):
+            icon = rest.pop(0)
+        if rest and isinstance(rest[0], str):
+            text = rest.pop(0)
+        if rest and parent is None:  # trailing QObject* parent
+            parent = rest.pop(0)
         QObject.__init__(self, parent)
-        text = args[0] if args and isinstance(args[0], str) else ""
-        if len(args) > 1 and isinstance(args[0], (QIcon, str)):
-            text = args[1] if len(args) > 1 else ""
         self._props["text"] = text
-        self._icon = QIcon()
+        self._icon = icon
         self._shortcut = ""
         self._parent = parent
 
