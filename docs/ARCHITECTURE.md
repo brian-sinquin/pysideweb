@@ -89,6 +89,12 @@ The browser client: `renderer.js` reconstructs the DOM from the JSON tree, appli
 incremental updates, and sends user interactions back over the socket. `style.css`
 provides the visual theme.
 
+`renderer.js` also translates Qt Style Sheets: a widget's `styleSheet` prop, when it
+contains rule blocks, is parsed into rules, its selectors/pseudo-states/sub-controls
+mapped to CSS, scoped to `[data-wid="wN"] …`, and injected as a `<style>` element. A
+bare declaration list is still applied inline. Custom `paintEvent` output arrives as
+`props.paint` and is replayed onto a `<canvas>` (see `painting.py`).
+
 ## Data flow
 
 **Python → Browser**
@@ -122,4 +128,8 @@ provides the visual theme.
   `QImage`/`QPixmap` pixel readback and any logic that depends on it can't work.
 - One shared widget tree is broadcast to all connected browsers (no per-session isolation
   yet).
-- QSS/stylesheets are not translated to CSS.
+- QSS translation is best-effort: property selectors (`[echoMode="2"]`) and sub-controls
+  we don't map to a real element are dropped, and Qt's cascade/specificity rules aren't
+  reproduced exactly.
+- `QFontMetrics` is approximate — there is no font engine server-side, so text widths
+  come from a per-character factor table, not real shaping.
