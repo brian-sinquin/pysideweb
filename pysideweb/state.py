@@ -45,6 +45,39 @@ def unregister_widget(wid: str):
         _root_widgets[:] = [w for w in _root_widgets if w._wid != wid]
 
 
+def _iter_layout_child_widgets(layout):
+    """Every widget reachable from `layout`, including through nested
+    sub-layouts (addLayout inside addLayout) -- same shape as
+    _append_layout_children, but yielding widgets instead of serializing."""
+    for item in layout._items:
+        widget = getattr(item, "_widget", None)
+        if widget is not None:
+            yield widget
+        sub_layout = getattr(item, "_layout", None)
+        if sub_layout is not None:
+            yield from _iter_layout_child_widgets(sub_layout)
+
+
+def unregister_subtree(widget) -> None:
+    """Unregister `widget` and every descendant still reachable from it
+    (its `_children` and everything placed in its `_layout`, recursively).
+
+    `deleteLater()` used to only unregister the widget itself -- every
+    descendant stayed in the id->widget registry (and, through their own
+    `_parent`/closures, unreachable-by-nothing-but-still-referenced by
+    Python's GC) for the remaining lifetime of the app. A dynamic list or
+    tab set that creates and discards subtrees would leak one registry
+    entry per discarded widget, forever.
+    """
+    for child in list(getattr(widget, "_children", ())):
+        unregister_subtree(child)
+    layout = getattr(widget, "_layout", None)
+    if layout is not None:
+        for child in _iter_layout_child_widgets(layout):
+            unregister_subtree(child)
+    unregister_widget(widget._wid)
+
+
 def get_widget(wid: str):
     with _lock:
         return _widgets.get(wid)
@@ -98,11 +131,36 @@ def notify_full_refresh():
 
 
 def drain_changes() -> list[dict]:
-    """Drain and return all pending changes."""
+    """Drain all pending changes, coalesced to the latest value per
+    (widget, prop) pair.
+
+    The broadcast loop only runs every _BROADCAST_INTERVAL (~50ms), so a
+    single drain can accumulate many updates to the same property -- a
+    slider mid-drag or text typed character by character both fire a
+    notify_change() per event, but only the last value in a batch is ever
+    going to matter once it reaches the browser. Sending the intermediate
+    ones is pure waste on both ends of the socket. Any `full_refresh`
+    markers are likewise collapsed to at most one.
+    """
     with _lock:
         changes = list(_change_queue)
         _change_queue.clear()
+
+    if not changes:
         return changes
+
+    updates: dict[tuple[str, str], dict] = {}
+    has_full_refresh = False
+    for change in changes:
+        if change.get("type") == "full_refresh":
+            has_full_refresh = True
+        else:
+            updates[(change["id"], change["prop"])] = change
+
+    result = list(updates.values())
+    if has_full_refresh:
+        result.append({"type": "full_refresh"})
+    return result
 
 
 def add_change_listener(listener: Callable):
@@ -114,6 +172,23 @@ def add_change_listener(listener: Callable):
 # Tree serialization
 # ---------------------------------------------------------------------------
 
+def _append_layout_children(layout, out: list[dict]) -> None:
+    """Serialize a layout's items (widgets, nested layouts, direct widgets/spacers) into `out`.
+
+    Shared by `serialize_widget` and `_serialize_layout_as_container` — both used to
+    walk `layout._items` by hand with the same three-way branch.
+    """
+    for item in layout._items:
+        if getattr(item, '_widget', None) is not None:
+            out.append(serialize_widget(item._widget))
+        elif getattr(item, '_layout', None) is not None:
+            # Nested layout (e.g. addLayout inside addLayout)
+            out.append(_serialize_layout_as_container(item._layout))
+        elif getattr(item, '_wid', None) is not None:
+            # Direct widget or stretch spacer
+            out.append(serialize_widget(item))
+
+
 def serialize_widget(widget) -> dict:
     """Serialize a single widget and all its children to a JSON-compatible dict."""
     data = {
@@ -124,23 +199,18 @@ def serialize_widget(widget) -> dict:
     }
 
     # Serialize layout children
-    if hasattr(widget, '_layout') and widget._layout is not None:
+    if getattr(widget, '_layout', None) is not None:
         layout = widget._layout
         data["layout"] = layout._get_props()
-        for item in layout._items:
-            if hasattr(item, '_widget') and item._widget is not None:
-                data["children"].append(serialize_widget(item._widget))
-            elif hasattr(item, '_layout') and item._layout is not None:
-                # Nested layout
-                data["children"].append(_serialize_layout_as_container(item._layout))
-            elif getattr(item, '_wid', None) is not None:
-                # Direct widget or stretch spacer
-                data["children"].append(serialize_widget(item))
+        _append_layout_children(layout, data["children"])
 
-    # Serialize direct children (added via setParent or addWidget)
+    # Serialize direct children (added via setParent or addWidget), skipping any
+    # already pulled in through the layout above.
     if hasattr(widget, '_children'):
+        seen = {c["id"] for c in data["children"]}
         for child in widget._children:
-            if child._wid not in [c.get("id") for c in data["children"]]:
+            if child._wid not in seen:
+                seen.add(child._wid)
                 data["children"].append(serialize_widget(child))
 
     return data
@@ -155,14 +225,7 @@ def _serialize_layout_as_container(layout) -> dict:
         "layout": layout._get_props(),
         "children": [],
     }
-    for item in layout._items:
-        if hasattr(item, '_widget') and item._widget is not None:
-            data["children"].append(serialize_widget(item._widget))
-        elif hasattr(item, '_layout') and item._layout is not None:
-            # Nested layout (e.g. addLayout inside addLayout)
-            data["children"].append(_serialize_layout_as_container(item._layout))
-        elif getattr(item, '_wid', None) is not None:
-            data["children"].append(serialize_widget(item))
+    _append_layout_children(layout, data["children"])
     return data
 
 

@@ -31,6 +31,46 @@
     // Element cache: widgetId → DOM element (for focused-input preservation)
     const focusCache = new Map();
 
+    // ── Rich text sanitization ────────────────────────────────
+    //
+    // QLabel/QPushButton text containing "<...>" is treated as Qt-style rich
+    // text (mirroring QLabel's own auto-detection of HTML content) and
+    // rendered via innerHTML rather than textContent. Text reaching a label
+    // often originates from data the Python app didn't author itself (a
+    // network response, a file, user input echoed back), so it must never
+    // be assigned to innerHTML verbatim — that's a direct DOM XSS sink,
+    // unlike real Qt's rich text renderer which never executes script.
+    // Only a small allowlist of formatting tags/attributes survives; every
+    // other tag is unwrapped (dropped, its content kept) and every
+    // non-allowlisted attribute is stripped.
+    const RICH_TEXT_ALLOWED_TAGS = new Set([
+        "B", "STRONG", "I", "EM", "U", "S", "BR", "P", "SPAN", "A", "SMALL",
+        "SUB", "SUP", "CODE", "PRE", "UL", "OL", "LI",
+        "H1", "H2", "H3", "H4", "H5", "H6", "DIV", "IMG",
+    ]);
+    const RICH_TEXT_ALLOWED_ATTRS = { A: new Set(["href"]), IMG: new Set(["src", "alt"]) };
+    const RICH_TEXT_SAFE_URL = /^(https?:|mailto:|data:image\/|#)/i;
+
+    function sanitizeRichText(html) {
+        const template = document.createElement("template");
+        template.innerHTML = String(html);
+        for (const el of Array.from(template.content.querySelectorAll("*"))) {
+            if (!RICH_TEXT_ALLOWED_TAGS.has(el.tagName)) {
+                el.replaceWith(...el.childNodes);
+                continue;
+            }
+            const allowedAttrs = RICH_TEXT_ALLOWED_ATTRS[el.tagName];
+            for (const attr of Array.from(el.attributes)) {
+                const name = attr.name.toLowerCase();
+                const isUrlAttr = name === "href" || name === "src";
+                const keep = allowedAttrs && allowedAttrs.has(name) &&
+                    (!isUrlAttr || RICH_TEXT_SAFE_URL.test(attr.value.trim()));
+                if (!keep) el.removeAttribute(attr.name);
+            }
+        }
+        return template.innerHTML;
+    }
+
     // ── WebSocket ──────────────────────────────────────────────
 
     function connect() {
@@ -125,7 +165,7 @@
                 } else {
                     // QLabel, QPushButton, etc.
                     if (val.includes("<") && val.includes(">")) {
-                        el.innerHTML = val;
+                        el.innerHTML = sanitizeRichText(val);
                     } else {
                         // Check if it has a text container child or update directly
                         const textSpan = el.querySelector("span:not(.btn-icon)");
@@ -274,9 +314,13 @@
 
         if (!el) {
             // Create a new element
-            const renderer = RENDERERS[node.type] || renderGenericWidget;
-            el = renderer(node);
+            const known = Object.prototype.hasOwnProperty.call(RENDERERS, node.type);
+            el = (known ? RENDERERS[node.type] : renderGenericWidget)(node);
             el.dataset.wid = node.id;
+            if (!known) {
+                el.classList.add("widget-unsupported");
+                el.title = `${node.type}: not implemented by pysideweb`;
+            }
             isNew = true;
         }
 
@@ -534,7 +578,7 @@
     function updateLabel(el, node) {
         const text = node.props.text || "";
         if (text.includes("<") && text.includes(">")) {
-            el.innerHTML = text;
+            el.innerHTML = sanitizeRichText(text);
         } else {
             el.textContent = text;
         }
@@ -889,10 +933,21 @@
     function renderWidget(node) {
         if (!node || !node.type) return null;
 
-        const renderer = RENDERERS[node.type] || renderGenericWidget;
-        const el = renderer(node);
+        const known = Object.prototype.hasOwnProperty.call(RENDERERS, node.type);
+        const el = (known ? RENDERERS[node.type] : renderGenericWidget)(node);
 
         if (!el) return null;
+
+        // A type pysideweb doesn't implement (third-party PySide6 code
+        // routinely uses classes far outside pysideweb's supported set --
+        // see interceptor.py's unknown-class fallback) still renders --
+        // as an empty box via renderGenericWidget -- but is marked so it's
+        // visually distinguishable from an intentionally empty QWidget
+        // rather than looking like a bug.
+        if (!known) {
+            el.classList.add("widget-unsupported");
+            el.title = `${node.type}: not implemented by pysideweb`;
+        }
 
         // Apply common props
         el.dataset.wid = node.id;
@@ -1125,7 +1180,7 @@
 
         const text = node.props.text || "";
         if (text.includes("<") && text.includes(">")) {
-            el.innerHTML = text;
+            el.innerHTML = sanitizeRichText(text);
         } else {
             el.textContent = text;
         }

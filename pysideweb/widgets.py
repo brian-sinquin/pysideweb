@@ -12,13 +12,17 @@ from typing import Any
 
 from . import state
 from .core import (
-    BoundSignal,
+    Prop,
     QFont,
     QIcon,
     QSize,
     Qt,
     Signal,
+    _AutoAttr,
+    _register_props,
 )
+
+_warned_unknown_methods: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Base: QWidget
@@ -28,6 +32,16 @@ class QWidget:
     """Virtual QWidget — base class for all virtual widgets."""
 
     _widget_type = "QWidget"
+    _declared_props: dict[str, Prop] = {}
+
+    objectName = Prop("", notify=True)
+    styleSheet = Prop("", notify=True)
+    windowTitle = Prop("", notify=True)
+    toolTip = Prop("", in_props=False)  # reported under the "tooltip" wire key below
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        _register_props(cls)
 
     def __init__(self, parent=None, flags=None):
         self._wid: str = state.register_widget(self)
@@ -35,18 +49,15 @@ class QWidget:
         self._children: list[QWidget] = []
         self._layout = None
         self._parent_layout = None
+        self._props: dict[str, Any] = {name: p.default for name, p in self._declared_props.items()}
         self._visible = True
         self._enabled = True
-        self._object_name = ""
-        self._style_sheet = ""
-        self._tooltip = ""
         self._min_size = QSize(0, 0)
         self._max_size = QSize(16777215, 16777215)
         self._fixed_size = None
         self._size_hint = QSize(-1, -1)
         self._font = QFont()
         self._cursor = None
-        self._window_title = ""
         self._geometry = (0, 0, 640, 480)
         self._focus_policy = 0
         self._extra_classes: list[str] = []
@@ -55,13 +66,13 @@ class QWidget:
         if parent is not None and hasattr(parent, '_children'):
             parent._children.append(self)
 
-    # -- Identification --
-    def objectName(self) -> str:
-        return self._object_name
-
-    def setObjectName(self, name: str):
-        self._object_name = name
-        self._notify("objectName", name)
+    def _reflective_props(self) -> dict:
+        """Declared Prop values, for a subclass's _get_props() to merge in."""
+        return {
+            name: self._props.get(name, p.default)
+            for name, p in self._declared_props.items()
+            if p.in_props
+        }
 
     # -- Visibility --
     def show(self):
@@ -167,22 +178,12 @@ class QWidget:
         return self._geometry[3]
 
     # -- Style --
-    def setStyleSheet(self, css: str):
-        self._style_sheet = css
-        self._notify("styleSheet", css)
-
-    def styleSheet(self) -> str:
-        return self._style_sheet
-
     def setFont(self, font: QFont):
         self._font = font
         self._notify("font", font.to_css())
 
     def font(self) -> QFont:
         return self._font
-
-    def setToolTip(self, tip: str):
-        self._tooltip = tip
 
     def setCursor(self, cursor):
         self._cursor = cursor
@@ -204,13 +205,6 @@ class QWidget:
         return self._layout
 
     # -- Window --
-    def setWindowTitle(self, title: str):
-        self._window_title = title
-        self._notify("windowTitle", title)
-
-    def windowTitle(self) -> str:
-        return self._window_title
-
     def setWindowIcon(self, icon):
         pass
 
@@ -231,9 +225,20 @@ class QWidget:
     def children(self):
         return list(self._children)
 
+    def _add_child(self, widget: QWidget):
+        """Reparent `widget` under self and register it as a child, once.
+
+        Shared by every container-ish addWidget()/setWidget()/addTab() —
+        previously each repeated the same "set parent, append if absent"
+        trio by hand.
+        """
+        widget._parent = self
+        if widget not in self._children:
+            self._children.append(widget)
+
     def findChild(self, type_=None, name: str = ""):
         for child in self._children:
-            if name and child._object_name == name:
+            if name and child.objectName() == name:
                 return child
             if type_ and isinstance(child, type_):
                 return child
@@ -243,7 +248,10 @@ class QWidget:
     def deleteLater(self):
         if self._parent and hasattr(self._parent, '_children'):
             self._parent._children = [c for c in self._parent._children if c is not self]
-        state.unregister_widget(self._wid)
+        # Unregisters this widget's whole subtree (its own children, plus
+        # anything placed in its layout), not just this one id -- see
+        # unregister_subtree()'s docstring for why that matters.
+        state.unregister_subtree(self)
         state.notify_full_refresh()
 
     def close(self):
@@ -274,12 +282,10 @@ class QWidget:
         props = {
             "visible": self._visible,
             "enabled": self._enabled,
-            "objectName": self._object_name,
-            "styleSheet": self._style_sheet,
-            "tooltip": self._tooltip,
-            "windowTitle": self._window_title,
+            "tooltip": self.toolTip(),
             "extraClasses": self._extra_classes,
         }
+        props.update(self._reflective_props())
         if self._font and self._font.family():
             props["font"] = self._font.to_css()
         if self._fixed_size:
@@ -294,6 +300,34 @@ class QWidget:
         """Handle events dispatched from the browser."""
         pass
 
+    def __getattr__(self, name: str):
+        """Fallback for methods pysideweb hasn't implemented on this widget.
+
+        Only reached when normal attribute lookup already failed -- every
+        method pysideweb *does* implement (including ones synthesized by
+        Prop()) is found first and never comes through here. Names starting
+        with "_" are excluded and raise normally: pysideweb's own internals
+        rely on hasattr(widget, "_children")-style duck typing, and
+        answering those with a placeholder instead of a real AttributeError
+        would silently corrupt that bookkeeping (see core.py's _AutoAttr
+        docstring). This exists so third-party PySide6 code -- not just
+        code written directly against pysideweb -- can call widget methods
+        pysideweb hasn't gotten around to without crashing the app; the
+        call just becomes a no-op.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        key = f"{type(self).__name__}.{name}"
+        if key not in _warned_unknown_methods:
+            _warned_unknown_methods.add(key)
+            print(f"[PySideWeb] Note: {key}() is not implemented -- ignoring the call. "
+                  f"If you need it, please open an issue.")
+        return _AutoAttr()
+
+# QWidget doesn't go through __init_subclass__ itself (that hook only fires
+# for subclasses), so its own Prop() declarations are registered explicitly
+# here, once.
+_register_props(QWidget)
 
 # ---------------------------------------------------------------------------
 # QMainWindow
@@ -311,9 +345,7 @@ class QMainWindow(QWidget):
 
     def setCentralWidget(self, widget: QWidget):
         self._central_widget = widget
-        widget._parent = self
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
         state.notify_full_refresh()
 
     def centralWidget(self):
@@ -347,7 +379,6 @@ class QMainWindow(QWidget):
             props["centralWidgetId"] = self._central_widget._wid
         return props
 
-
 # ---------------------------------------------------------------------------
 # QFrame
 # ---------------------------------------------------------------------------
@@ -365,27 +396,12 @@ class QFrame(QWidget):
     Raised = 0x0020
     Sunken = 0x0030
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._frame_shape = QFrame.NoFrame
-        self._frame_shadow = QFrame.Plain
-        self._line_width = 1
-
-    def setFrameShape(self, shape: int):
-        self._frame_shape = shape
-
-    def setFrameShadow(self, shadow: int):
-        self._frame_shadow = shadow
-
-    def setLineWidth(self, w: int):
-        self._line_width = w
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["frameShape"] = self._frame_shape
-        props["frameShadow"] = self._frame_shadow
-        return props
-
+    frameShape = Prop(NoFrame)
+    frameShadow = Prop(Plain)
+    # `lineWidth` had no getter at all in the hand-written version (only
+    # setLineWidth() existed, storing into an otherwise-unread
+    # `self._line_width`) — Prop gives it a matching getter for free.
+    lineWidth = Prop(1)
 
 # ---------------------------------------------------------------------------
 # QPushButton
@@ -396,31 +412,16 @@ class QPushButton(QWidget):
 
     clicked = Signal()
 
+    text = Prop("", notify=True)
+    checked = Prop(False, notify=True, getter="isChecked")
+    checkable = Prop(False, getter="isCheckable")
+    flat = Prop(False, getter="isFlat")
+
     def __init__(self, text: str = "", parent=None, icon=None):
         super().__init__(parent)
-        self._text = text
+        self._props["text"] = text
         self._icon = icon or QIcon()
-        self._checkable = False
-        self._checked = False
-        self._flat = False
         self._auto_default = False
-        # Bound signal
-        self._signal_clicked = BoundSignal(QPushButton.clicked, self)
-
-    @property
-    def clicked(self):
-        return self._signal_clicked
-
-    @clicked.setter
-    def clicked(self, v):
-        pass
-
-    def text(self) -> str:
-        return self._text
-
-    def setText(self, text: str):
-        self._text = text
-        self._notify("text", text)
 
     def setIcon(self, icon):
         self._icon = icon
@@ -428,22 +429,6 @@ class QPushButton(QWidget):
 
     def icon(self):
         return self._icon
-
-    def setCheckable(self, checkable: bool):
-        self._checkable = checkable
-
-    def isCheckable(self) -> bool:
-        return self._checkable
-
-    def setChecked(self, checked: bool):
-        self._checked = checked
-        self._notify("checked", checked)
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def setFlat(self, flat: bool):
-        self._flat = flat
 
     def setDefault(self, default: bool):
         self._auto_default = default
@@ -453,20 +438,15 @@ class QPushButton(QWidget):
 
     def _get_props(self) -> dict:
         props = super()._get_props()
-        props["text"] = self._text
-        props["checkable"] = self._checkable
-        props["checked"] = self._checked
-        props["flat"] = self._flat
         if self._icon and not self._icon.isNull():
             props["icon"] = self._icon.text()
         return props
 
     def _handle_event(self, event_type, value):
         if event_type == "clicked":
-            if self._checkable:
-                self._checked = not self._checked
-            self._signal_clicked.emit(self._checked if self._checkable else False)
-
+            if self.isCheckable():
+                self.setChecked(not self.isChecked())
+            self.clicked.emit(self.isChecked() if self.isCheckable() else False)
 
 # ---------------------------------------------------------------------------
 # QLabel
@@ -477,51 +457,24 @@ class QLabel(QWidget):
 
     linkActivated = Signal(str)
 
+    text = Prop("", notify=True)
+    alignment = Prop(0, cast=int)
+    wordWrap = Prop(False)
+    # None of these four had a getter in the hand-written version (only the
+    # setter existed) — Prop adds one for free.
+    scaledContents = Prop(False, getter="hasScaledContents")
+    indent = Prop(-1)
+    margin = Prop(0)
+    textFormat = Prop(0)  # PlainText
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
-        self._text = text
-        self._alignment = 0
-        self._word_wrap = False
+        self._props["text"] = text
         self._pixmap = None
-        self._text_format = 0  # PlainText
-        self._indent = -1
-        self._margin = 0
         self._buddy = None
-        self._scaled_contents = False
-        self._signal_linkActivated = BoundSignal(QLabel.linkActivated, self)
-
-    @property
-    def linkActivated(self):
-        return self._signal_linkActivated
-
-    @linkActivated.setter
-    def linkActivated(self, v):
-        pass
-
-    def text(self) -> str:
-        return self._text
-
-    def setText(self, text: str):
-        self._text = text
-        self._notify("text", text)
-
-    def setAlignment(self, alignment):
-        self._alignment = int(alignment)
-
-    def alignment(self):
-        return self._alignment
-
-    def setWordWrap(self, wrap: bool):
-        self._word_wrap = wrap
-
-    def wordWrap(self) -> bool:
-        return self._word_wrap
 
     def setPixmap(self, pixmap):
         self._pixmap = pixmap
-
-    def setScaledContents(self, scaled: bool):
-        self._scaled_contents = scaled
 
     def setTextInteractionFlags(self, flags):
         pass
@@ -531,23 +484,6 @@ class QLabel(QWidget):
 
     def setBuddy(self, buddy):
         self._buddy = buddy
-
-    def setIndent(self, indent: int):
-        self._indent = indent
-
-    def setMargin(self, margin: int):
-        self._margin = margin
-
-    def setTextFormat(self, fmt):
-        self._text_format = fmt
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["text"] = self._text
-        props["alignment"] = self._alignment
-        props["wordWrap"] = self._word_wrap
-        return props
-
 
 # ---------------------------------------------------------------------------
 # QLineEdit
@@ -566,69 +502,28 @@ class QLineEdit(QWidget):
         NoEcho = 1
         PasswordEchoOnEdit = 3
 
+    text = Prop("", notify=True)
+    placeholder = Prop("", in_props=True)
+    readOnly = Prop(False, getter="isReadOnly")
+    echoMode = Prop(EchoMode.Normal)
+    clearButton = Prop(False)
+    # Not part of the wire payload (renderer.js never read it, same as
+    # before) -- in_props=False keeps that, while still getting a real
+    # maxLength()/setMaxLength() pair instead of a write-only attribute.
+    maxLength = Prop(32767, in_props=False)
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
-        self._text = text
-        self._placeholder = ""
-        self._read_only = False
-        self._max_length = 32767
-        self._echo_mode = QLineEdit.EchoMode.Normal
-        self._clear_button = False
-        self._signal_textChanged = BoundSignal(QLineEdit.textChanged, self)
-        self._signal_returnPressed = BoundSignal(QLineEdit.returnPressed, self)
-        self._signal_editingFinished = BoundSignal(QLineEdit.editingFinished, self)
-
-    @property
-    def textChanged(self):
-        return self._signal_textChanged
-
-    @textChanged.setter
-    def textChanged(self, v):
-        pass
-
-    @property
-    def returnPressed(self):
-        return self._signal_returnPressed
-
-    @returnPressed.setter
-    def returnPressed(self, v):
-        pass
-
-    @property
-    def editingFinished(self):
-        return self._signal_editingFinished
-
-    @editingFinished.setter
-    def editingFinished(self, v):
-        pass
-
-    def text(self) -> str:
-        return self._text
-
-    def setText(self, text: str):
-        self._text = text
-        self._notify("text", text)
+        self._props["text"] = text
 
     def setPlaceholderText(self, text: str):
-        self._placeholder = text
+        self.setPlaceholder(text)
 
     def placeholderText(self) -> str:
-        return self._placeholder
-
-    def setReadOnly(self, ro: bool):
-        self._read_only = ro
-
-    def isReadOnly(self) -> bool:
-        return self._read_only
-
-    def setMaxLength(self, length: int):
-        self._max_length = length
-
-    def setEchoMode(self, mode: int):
-        self._echo_mode = mode
+        return self.placeholder()
 
     def setClearButtonEnabled(self, enabled: bool):
-        self._clear_button = enabled
+        self.setClearButton(enabled)
 
     def clear(self):
         self.setText("")
@@ -636,25 +531,15 @@ class QLineEdit(QWidget):
     def selectAll(self):
         pass
 
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["text"] = self._text
-        props["placeholder"] = self._placeholder
-        props["readOnly"] = self._read_only
-        props["echoMode"] = self._echo_mode
-        props["clearButton"] = self._clear_button
-        return props
-
     def _handle_event(self, event_type, value):
         if event_type == "textChanged":
             # Update local value without triggering a server-to-client notify broadcast
-            self._text = value
-            self._signal_textChanged.emit(value)
+            self._props["text"] = value
+            self.textChanged.emit(value)
         elif event_type == "returnPressed":
-            self._signal_returnPressed.emit()
+            self.returnPressed.emit()
         elif event_type == "editingFinished":
-            self._signal_editingFinished.emit()
-
+            self.editingFinished.emit()
 
 # ---------------------------------------------------------------------------
 # QTextEdit
@@ -665,66 +550,44 @@ class QTextEdit(QWidget):
 
     textChanged = Signal()
 
+    plainText = Prop("", notify=True, in_props=False)  # exposed as "text" below
+    html = Prop("", notify=True, in_props=False)  # not part of the wire payload (matches original)
+    readOnly = Prop(False, getter="isReadOnly")
+    placeholder = Prop("")
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
-        self._text = text
-        self._html = ""
-        self._read_only = False
-        self._placeholder = ""
-        self._signal_textChanged = BoundSignal(QTextEdit.textChanged, self)
-
-    @property
-    def textChanged(self):
-        return self._signal_textChanged
-
-    @textChanged.setter
-    def textChanged(self, v):
-        pass
+        self._props["plainText"] = text
 
     def toPlainText(self) -> str:
-        return self._text
-
-    def setPlainText(self, text: str):
-        self._text = text
-        self._notify("text", text)
+        return self.plainText()
 
     def setText(self, text: str):
         self.setPlainText(text)
 
     def toHtml(self) -> str:
-        return self._html
-
-    def setHtml(self, html: str):
-        self._html = html
-        self._notify("html", html)
-
-    def setReadOnly(self, ro: bool):
-        self._read_only = ro
+        return self.html()
 
     def setPlaceholderText(self, text: str):
-        self._placeholder = text
+        self.setPlaceholder(text)
 
     def append(self, text: str):
-        self._text += "\n" + text
-        self._notify("text", self._text)
+        self.setPlainText(self.plainText() + "\n" + text)
 
     def clear(self):
-        self._text = ""
-        self._html = ""
-        self._notify("text", "")
+        self.setPlainText("")
+        self.setHtml("")
 
     def _get_props(self) -> dict:
         props = super()._get_props()
-        props["text"] = self._text
-        props["readOnly"] = self._read_only
-        props["placeholder"] = self._placeholder
+        props["text"] = self.plainText()
         return props
 
     def _handle_event(self, event_type, value):
         if event_type == "textChanged":
-            self._text = value
-            self._signal_textChanged.emit()
-
+            # Mirror the browser's value without re-notifying it (avoids an echo).
+            self._props["plainText"] = value
+            self.textChanged.emit()
 
 # ---------------------------------------------------------------------------
 # QComboBox
@@ -736,41 +599,29 @@ class QComboBox(QWidget):
     currentIndexChanged = Signal(int)
     currentTextChanged = Signal(str)
 
+    # Was hand-tracked as `self._current_index` with a manual `_notify()` call
+    # in every mutator plus a `currentIndexChanged.emit()` duplicated in
+    # `_handle_event`; as a Prop, storage/notify/getter/setter are generated
+    # and `currentIndexChanged` is emitted for free whenever the value
+    # actually changes (previously only emitted from the browser-event path).
+    currentIndex = Prop(-1, notify=True, signal="currentIndexChanged", cast=int)
+    editable = Prop(False, getter="isEditable")
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: list[str] = []
-        self._current_index = -1
-        self._editable = False
-        self._signal_currentIndexChanged = BoundSignal(QComboBox.currentIndexChanged, self)
-        self._signal_currentTextChanged = BoundSignal(QComboBox.currentTextChanged, self)
-
-    @property
-    def currentIndexChanged(self):
-        return self._signal_currentIndexChanged
-
-    @currentIndexChanged.setter
-    def currentIndexChanged(self, v):
-        pass
-
-    @property
-    def currentTextChanged(self):
-        return self._signal_currentTextChanged
-
-    @currentTextChanged.setter
-    def currentTextChanged(self, v):
-        pass
 
     def addItem(self, text: str, data=None):
         self._items.append(text)
-        if self._current_index < 0:
-            self._current_index = 0
+        if self.currentIndex() < 0:
+            self.setCurrentIndex(0)
         self._notify("items", self._items)
 
     def addItems(self, texts: list[str]):
         for t in texts:
             self._items.append(t)
-        if self._current_index < 0 and self._items:
-            self._current_index = 0
+        if self.currentIndex() < 0 and self._items:
+            self.setCurrentIndex(0)
         self._notify("items", self._items)
 
     def insertItem(self, index: int, text: str):
@@ -779,24 +630,18 @@ class QComboBox(QWidget):
     def removeItem(self, index: int):
         if 0 <= index < len(self._items):
             self._items.pop(index)
-            if self._current_index >= len(self._items):
-                self._current_index = len(self._items) - 1
+            if self.currentIndex() >= len(self._items):
+                self.setCurrentIndex(len(self._items) - 1)
 
     def clear(self):
         self._items.clear()
-        self._current_index = -1
+        self.setCurrentIndex(-1)
         self._notify("items", [])
 
-    def currentIndex(self) -> int:
-        return self._current_index
-
-    def setCurrentIndex(self, idx: int):
-        self._current_index = idx
-        self._notify("currentIndex", idx)
-
     def currentText(self) -> str:
-        if 0 <= self._current_index < len(self._items):
-            return self._items[self._current_index]
+        idx = self.currentIndex()
+        if 0 <= idx < len(self._items):
+            return self._items[idx]
         return ""
 
     def setCurrentText(self, text: str):
@@ -809,23 +654,15 @@ class QComboBox(QWidget):
     def itemText(self, index: int) -> str:
         return self._items[index] if 0 <= index < len(self._items) else ""
 
-    def setEditable(self, editable: bool):
-        self._editable = editable
-
     def _get_props(self) -> dict:
         props = super()._get_props()
         props["items"] = self._items
-        props["currentIndex"] = self._current_index
-        props["editable"] = self._editable
         return props
 
     def _handle_event(self, event_type, value):
         if event_type == "currentIndexChanged":
-            idx = int(value)
-            self._current_index = idx
-            self._signal_currentIndexChanged.emit(idx)
-            self._signal_currentTextChanged.emit(self.currentText())
-
+            self.setCurrentIndex(int(value))
+            self.currentTextChanged.emit(self.currentText())
 
 # ---------------------------------------------------------------------------
 # QCheckBox
@@ -837,62 +674,22 @@ class QCheckBox(QWidget):
     stateChanged = Signal(int)
     toggled = Signal(bool)
 
+    text = Prop("", notify=True)
+    checked = Prop(False, notify=True, getter="isChecked")
+    tristate = Prop(False, getter="isTristate")
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
-        self._text = text
-        self._checked = False
-        self._tristate = False
-        self._signal_stateChanged = BoundSignal(QCheckBox.stateChanged, self)
-        self._signal_toggled = BoundSignal(QCheckBox.toggled, self)
-
-    @property
-    def stateChanged(self):
-        return self._signal_stateChanged
-
-    @stateChanged.setter
-    def stateChanged(self, v):
-        pass
-
-    @property
-    def toggled(self):
-        return self._signal_toggled
-
-    @toggled.setter
-    def toggled(self, v):
-        pass
-
-    def text(self) -> str:
-        return self._text
-
-    def setText(self, text: str):
-        self._text = text
-        self._notify("text", text)
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def setChecked(self, checked: bool):
-        self._checked = checked
-        self._notify("checked", checked)
+        self._props["text"] = text
 
     def checkState(self):
-        return Qt.Checked if self._checked else Qt.Unchecked
-
-    def setTristate(self, tri: bool):
-        self._tristate = tri
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["text"] = self._text
-        props["checked"] = self._checked
-        return props
+        return Qt.Checked if self.isChecked() else Qt.Unchecked
 
     def _handle_event(self, event_type, value):
         if event_type == "toggled":
-            self._checked = bool(value)
-            self._signal_stateChanged.emit(2 if self._checked else 0)
-            self._signal_toggled.emit(self._checked)
-
+            self.setChecked(bool(value))
+            self.stateChanged.emit(2 if self.isChecked() else 0)
+            self.toggled.emit(self.isChecked())
 
 # ---------------------------------------------------------------------------
 # QRadioButton
@@ -903,141 +700,64 @@ class QRadioButton(QWidget):
 
     toggled = Signal(bool)
 
+    text = Prop("", notify=True)
+    checked = Prop(False, notify=True, getter="isChecked")
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
-        self._text = text
-        self._checked = False
-        self._signal_toggled = BoundSignal(QRadioButton.toggled, self)
-
-    @property
-    def toggled(self):
-        return self._signal_toggled
-
-    @toggled.setter
-    def toggled(self, v):
-        pass
-
-    def text(self) -> str:
-        return self._text
-
-    def setText(self, text: str):
-        self._text = text
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def setChecked(self, checked: bool):
-        self._checked = checked
-        self._notify("checked", checked)
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["text"] = self._text
-        props["checked"] = self._checked
-        return props
+        self._props["text"] = text
 
     def _handle_event(self, event_type, value):
         if event_type == "toggled":
-            self._checked = bool(value)
-            self._signal_toggled.emit(self._checked)
-
+            self.setChecked(bool(value))
+            self.toggled.emit(self.isChecked())
 
 # ---------------------------------------------------------------------------
 # QSlider
 # ---------------------------------------------------------------------------
 
-class QSlider(QWidget):
+class _RangedMixin:
+    """Shared logic for widgets with a bounded, notify+signal `value` Prop
+    (QSlider, QSpinBox, QDoubleSpinBox). Each still declares its own
+    `value`/`minimum`/`maximum` Prop (so defaults/cast can differ), but the
+    clamp-then-store-then-conditionally-emit rule — previously duplicated
+    3 times, and silently *missing* on QDoubleSpinBox — is written once.
+    """
+
+    def setRange(self, min_val, max_val):
+        self.setMinimum(min_val)
+        self.setMaximum(max_val)
+
+    def setValue(self, val):
+        val = max(self.minimum(), min(self.maximum(), val))
+        self._raw_set_value(val)
+
+class QSlider(_RangedMixin, QWidget):
     _widget_type = "QSlider"
 
     valueChanged = Signal(int)
     sliderMoved = Signal(int)
 
+    value = Prop(0, notify=True, signal="valueChanged")
+    minimum = Prop(0)
+    maximum = Prop(99)
+    singleStep = Prop(1)
+    pageStep = Prop(10)
+    tickPosition = Prop(0)
+    tickInterval = Prop(0)
+    # None of pageStep/tickPosition/tickInterval/orientation had a getter in
+    # the hand-written version -- Prop adds one for each, for free.
+    orientation = Prop(int(Qt.Horizontal), cast=int)
+
     def __init__(self, orientation=None, parent=None):
         super().__init__(parent)
-        self._orientation = orientation or Qt.Horizontal
-        self._value = 0
-        self._minimum = 0
-        self._maximum = 99
-        self._single_step = 1
-        self._page_step = 10
-        self._tick_position = 0
-        self._tick_interval = 0
-        self._signal_valueChanged = BoundSignal(QSlider.valueChanged, self)
-        self._signal_sliderMoved = BoundSignal(QSlider.sliderMoved, self)
-
-    @property
-    def valueChanged(self):
-        return self._signal_valueChanged
-
-    @valueChanged.setter
-    def valueChanged(self, v):
-        pass
-
-    @property
-    def sliderMoved(self):
-        return self._signal_sliderMoved
-
-    @sliderMoved.setter
-    def sliderMoved(self, v):
-        pass
-
-    def value(self) -> int:
-        return self._value
-
-    def setValue(self, val: int):
-        new = max(self._minimum, min(self._maximum, val))
-        changed = new != self._value
-        self._value = new
-        self._notify("value", self._value)
-        if changed:  # match Qt: programmatic setValue emits valueChanged
-            self._signal_valueChanged.emit(self._value)
-
-    def minimum(self) -> int:
-        return self._minimum
-
-    def setMinimum(self, val: int):
-        self._minimum = val
-
-    def maximum(self) -> int:
-        return self._maximum
-
-    def setMaximum(self, val: int):
-        self._maximum = val
-
-    def setRange(self, min_val: int, max_val: int):
-        self._minimum = min_val
-        self._maximum = max_val
-
-    def setSingleStep(self, step: int):
-        self._single_step = step
-
-    def setPageStep(self, step: int):
-        self._page_step = step
-
-    def setTickPosition(self, pos):
-        self._tick_position = pos
-
-    def setTickInterval(self, interval: int):
-        self._tick_interval = interval
-
-    def setOrientation(self, orientation):
-        self._orientation = orientation
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["value"] = self._value
-        props["minimum"] = self._minimum
-        props["maximum"] = self._maximum
-        props["orientation"] = int(self._orientation)
-        props["singleStep"] = self._single_step
-        return props
+        if orientation is not None:
+            self.setOrientation(orientation)
 
     def _handle_event(self, event_type, value):
         if event_type == "valueChanged":
-            self._value = int(value)
-            self._signal_valueChanged.emit(self._value)
-            self._signal_sliderMoved.emit(self._value)
-
+            self.setValue(int(value))
+            self.sliderMoved.emit(self.value())
 
 # ---------------------------------------------------------------------------
 # QProgressBar
@@ -1046,162 +766,60 @@ class QSlider(QWidget):
 class QProgressBar(QWidget):
     _widget_type = "QProgressBar"
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._value = 0
-        self._minimum = 0
-        self._maximum = 100
-        self._text_visible = True
-        self._format = "%p%"
-        self._orientation = Qt.Horizontal
-
-    def value(self) -> int:
-        return self._value
-
-    def setValue(self, val: int):
-        self._value = val
-        self._notify("value", val)
-
-    def minimum(self) -> int:
-        return self._minimum
-
-    def setMinimum(self, val: int):
-        self._minimum = val
-
-    def maximum(self) -> int:
-        return self._maximum
-
-    def setMaximum(self, val: int):
-        self._maximum = val
+    # Note: unlike QSlider/QSpinBox, real QProgressBar.setValue() does not
+    # clamp to [minimum, maximum] here — matches the pre-existing behavior.
+    value = Prop(0, notify=True)
+    minimum = Prop(0)
+    maximum = Prop(100)
+    textVisible = Prop(True)
+    format = Prop("%p%")
+    # Never part of the wire payload for QProgressBar (unlike QSlider) --
+    # in_props=False keeps that; only a real getter is new here.
+    orientation = Prop(int(Qt.Horizontal), cast=int, in_props=False)
 
     def setRange(self, min_val: int, max_val: int):
-        self._minimum = min_val
-        self._maximum = max_val
-
-    def setTextVisible(self, visible: bool):
-        self._text_visible = visible
-
-    def setFormat(self, fmt: str):
-        self._format = fmt
-
-    def setOrientation(self, orientation):
-        self._orientation = orientation
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["value"] = self._value
-        props["minimum"] = self._minimum
-        props["maximum"] = self._maximum
-        props["textVisible"] = self._text_visible
-        props["format"] = self._format
-        return props
-
+        self.setMinimum(min_val)
+        self.setMaximum(max_val)
 
 # ---------------------------------------------------------------------------
 # QSpinBox / QDoubleSpinBox
 # ---------------------------------------------------------------------------
 
-class QSpinBox(QWidget):
+class QSpinBox(_RangedMixin, QWidget):
     _widget_type = "QSpinBox"
 
     valueChanged = Signal(int)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._value = 0
-        self._minimum = 0
-        self._maximum = 99
-        self._single_step = 1
-        self._prefix = ""
-        self._suffix = ""
-        self._signal_valueChanged = BoundSignal(QSpinBox.valueChanged, self)
-
-    @property
-    def valueChanged(self):
-        return self._signal_valueChanged
-
-    @valueChanged.setter
-    def valueChanged(self, v):
-        pass
-
-    def value(self) -> int:
-        return self._value
-
-    def setValue(self, val: int):
-        new = max(self._minimum, min(self._maximum, val))
-        changed = new != self._value
-        self._value = new
-        self._notify("value", self._value)
-        if changed:  # match Qt: programmatic setValue emits valueChanged
-            self._signal_valueChanged.emit(self._value)
-
-    def minimum(self) -> int:
-        return self._minimum
-
-    def setMinimum(self, val: int):
-        self._minimum = val
-
-    def maximum(self) -> int:
-        return self._maximum
-
-    def setMaximum(self, val: int):
-        self._maximum = val
-
-    def setRange(self, min_val: int, max_val: int):
-        self._minimum = min_val
-        self._maximum = max_val
-
-    def setSingleStep(self, step: int):
-        self._single_step = step
-
-    def setPrefix(self, prefix: str):
-        self._prefix = prefix
-
-    def setSuffix(self, suffix: str):
-        self._suffix = suffix
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["value"] = self._value
-        props["minimum"] = self._minimum
-        props["maximum"] = self._maximum
-        props["singleStep"] = self._single_step
-        props["prefix"] = self._prefix
-        props["suffix"] = self._suffix
-        return props
+    value = Prop(0, notify=True, signal="valueChanged", cast=int)
+    minimum = Prop(0)
+    maximum = Prop(99)
+    singleStep = Prop(1)
+    prefix = Prop("")
+    suffix = Prop("")
 
     def _handle_event(self, event_type, value):
         if event_type == "valueChanged":
-            self._value = int(value)
-            self._signal_valueChanged.emit(self._value)
-
+            self.setValue(int(value))
 
 class QDoubleSpinBox(QSpinBox):
     _widget_type = "QDoubleSpinBox"
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._decimals = 2
-        self._value = 0.0
-
-    def setDecimals(self, decimals: int):
-        self._decimals = decimals
-
-    def setValue(self, val: float):
-        self._value = max(self._minimum, min(self._maximum, val))
-        self._notify("value", self._value)
+    # Redeclared with a float default/cast — everything else (clamping,
+    # notify, conditional valueChanged emission) is inherited from
+    # QSpinBox/_RangedMixin. The original hand-written override of this
+    # setValue() never emitted valueChanged at all; going through the
+    # shared engine fixes that for free.
+    value = Prop(0.0, notify=True, signal="valueChanged", cast=float)
+    decimals = Prop(2)
 
     def _get_props(self) -> dict:
         props = super()._get_props()
-        props["decimals"] = self._decimals
-        props["step"] = self._single_step
+        props["step"] = self.singleStep()
         return props
 
     def _handle_event(self, event_type, value):
         if event_type == "valueChanged":
-            self._value = float(value)
-            self._signal_valueChanged.emit(self._value)
-
+            self.setValue(float(value))
 
 # ---------------------------------------------------------------------------
 # QTabWidget
@@ -1212,20 +830,12 @@ class QTabWidget(QWidget):
 
     currentChanged = Signal(int)
 
+    currentIndex = Prop(0, notify=True, signal="currentChanged", cast=int)
+    tabPosition = Prop(0, in_props=False)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._tabs: list[dict] = []  # [{text, icon, widget}]
-        self._current_index = 0
-        self._tab_position = 0  # North
-        self._signal_currentChanged = BoundSignal(QTabWidget.currentChanged, self)
-
-    @property
-    def currentChanged(self):
-        return self._signal_currentChanged
-
-    @currentChanged.setter
-    def currentChanged(self, v):
-        pass
 
     def addTab(self, widget: QWidget, *args) -> int:
         icon = None
@@ -1236,9 +846,7 @@ class QTabWidget(QWidget):
             icon = args[0]
             text = args[1]
         tab = {"text": text, "icon": icon, "widget": widget}
-        widget._parent = self
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
         self._tabs.append(tab)
         state.notify_full_refresh()
         return len(self._tabs) - 1
@@ -1252,16 +860,8 @@ class QTabWidget(QWidget):
     def removeTab(self, index: int):
         if 0 <= index < len(self._tabs):
             self._tabs.pop(index)
-            if self._current_index >= len(self._tabs):
-                self._current_index = max(0, len(self._tabs) - 1)
-
-    def setCurrentIndex(self, index: int):
-        self._current_index = index
-        self._notify("currentIndex", index)
-        self._signal_currentChanged.emit(index)
-
-    def currentIndex(self) -> int:
-        return self._current_index
+            if self.currentIndex() >= len(self._tabs):
+                self.setCurrentIndex(max(0, len(self._tabs) - 1))
 
     def count(self) -> int:
         return len(self._tabs)
@@ -1275,9 +875,6 @@ class QTabWidget(QWidget):
 
     def widget(self, index: int):
         return self._tabs[index]["widget"] if 0 <= index < len(self._tabs) else None
-
-    def setTabPosition(self, pos):
-        self._tab_position = pos
 
     def setTabBarAutoHide(self, hide: bool):
         pass
@@ -1298,13 +895,11 @@ class QTabWidget(QWidget):
             }
             for t in self._tabs
         ]
-        props["currentIndex"] = self._current_index
         return props
 
     def _handle_event(self, event_type, value):
         if event_type == "currentChanged":
             self.setCurrentIndex(int(value))
-
 
 # ---------------------------------------------------------------------------
 # QGroupBox
@@ -1315,47 +910,13 @@ class QGroupBox(QWidget):
 
     toggled = Signal(bool)
 
+    title = Prop("", notify=True)
+    checkable = Prop(False, getter="isCheckable")
+    checked = Prop(True, getter="isChecked")
+
     def __init__(self, title: str = "", parent=None):
         super().__init__(parent)
-        self._title = title
-        self._checkable = False
-        self._checked = True
-        self._signal_toggled = BoundSignal(QGroupBox.toggled, self)
-
-    @property
-    def toggled(self):
-        return self._signal_toggled
-
-    @toggled.setter
-    def toggled(self, v):
-        pass
-
-    def title(self) -> str:
-        return self._title
-
-    def setTitle(self, title: str):
-        self._title = title
-        self._notify("title", title)
-
-    def setCheckable(self, checkable: bool):
-        self._checkable = checkable
-
-    def isCheckable(self) -> bool:
-        return self._checkable
-
-    def setChecked(self, checked: bool):
-        self._checked = checked
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["title"] = self._title
-        props["checkable"] = self._checkable
-        props["checked"] = self._checked
-        return props
-
+        self._props["title"] = title
 
 # ---------------------------------------------------------------------------
 # QScrollArea
@@ -1364,22 +925,18 @@ class QGroupBox(QWidget):
 class QScrollArea(QWidget):
     _widget_type = "QScrollArea"
 
+    widgetResizable = Prop(True)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._widget_inside = None
-        self._widget_resizable = True
 
     def setWidget(self, widget: QWidget):
         self._widget_inside = widget
-        widget._parent = self
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
 
     def widget(self):
         return self._widget_inside
-
-    def setWidgetResizable(self, resizable: bool):
-        self._widget_resizable = resizable
 
     def setHorizontalScrollBarPolicy(self, policy):
         pass
@@ -1389,11 +946,9 @@ class QScrollArea(QWidget):
 
     def _get_props(self) -> dict:
         props = super()._get_props()
-        props["widgetResizable"] = self._widget_resizable
         if self._widget_inside:
             props["innerWidgetId"] = self._widget_inside._wid
         return props
-
 
 # ---------------------------------------------------------------------------
 # QStackedWidget
@@ -1404,38 +959,21 @@ class QStackedWidget(QWidget):
 
     currentChanged = Signal(int)
 
+    currentIndex = Prop(0, notify=True, signal="currentChanged", cast=int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pages: list[QWidget] = []
-        self._current_index = 0
-        self._signal_currentChanged = BoundSignal(QStackedWidget.currentChanged, self)
-
-    @property
-    def currentChanged(self):
-        return self._signal_currentChanged
-
-    @currentChanged.setter
-    def currentChanged(self, v):
-        pass
 
     def addWidget(self, widget: QWidget) -> int:
-        widget._parent = self
+        self._add_child(widget)
         self._pages.append(widget)
-        if widget not in self._children:
-            self._children.append(widget)
         return len(self._pages) - 1
 
-    def setCurrentIndex(self, index: int):
-        self._current_index = index
-        self._notify("currentIndex", index)
-        self._signal_currentChanged.emit(index)
-
-    def currentIndex(self) -> int:
-        return self._current_index
-
     def currentWidget(self):
-        if 0 <= self._current_index < len(self._pages):
-            return self._pages[self._current_index]
+        idx = self.currentIndex()
+        if 0 <= idx < len(self._pages):
+            return self._pages[idx]
         return None
 
     def count(self) -> int:
@@ -1446,7 +984,6 @@ class QStackedWidget(QWidget):
 
     def _get_props(self) -> dict:
         props = super()._get_props()
-        props["currentIndex"] = self._current_index
         props["pageIds"] = [p._wid for p in self._pages]
         return props
 
@@ -1454,16 +991,22 @@ class QStackedWidget(QWidget):
         if event_type == "currentChanged":
             self.setCurrentIndex(int(value))
 
-
 # ---------------------------------------------------------------------------
 # QListWidget
 # ---------------------------------------------------------------------------
 
 class QListWidgetItem:
+    """Not a QWidget (no `_wid`/state registration), but its properties still
+    follow the same declare-once shape, so `Prop` (with `notify=False`, the
+    default) generates the accessors here too instead of hand-writing them."""
+
+    text = Prop("")
+    selected = Prop(False, getter="isSelected")
+
     def __init__(self, text: str = "", parent=None):
-        self._text = text
+        self._props: dict = {name: p.default for name, p in self._declared_props.items()}
+        self._props["text"] = text
         self._icon = QIcon()
-        self._selected = False
         self._data: dict = {}
         self._flags = 0
         self._font = QFont()
@@ -1472,23 +1015,11 @@ class QListWidgetItem:
         if parent is not None:
             parent.addItem(self)
 
-    def text(self) -> str:
-        return self._text
-
-    def setText(self, text: str):
-        self._text = text
-
     def setIcon(self, icon):
         self._icon = icon
 
     def icon(self):
         return self._icon
-
-    def setSelected(self, selected: bool):
-        self._selected = selected
-
-    def isSelected(self) -> bool:
-        return self._selected
 
     def setData(self, role: int, value):
         self._data[role] = value
@@ -1509,13 +1040,15 @@ class QListWidgetItem:
         self._background = brush
 
     def to_dict(self) -> dict:
-        d = {"text": self._text}
+        d = {"text": self.text()}
         if self._icon and not self._icon.isNull():
             d["icon"] = self._icon.text()
-        if self._selected:
+        if self.isSelected():
             d["selected"] = True
         return d
 
+
+_register_props(QListWidgetItem)
 
 class QListWidget(QWidget):
     _widget_type = "QListWidget"
@@ -1524,28 +1057,11 @@ class QListWidget(QWidget):
     itemClicked = Signal(object)
     itemDoubleClicked = Signal(object)
 
+    currentRow = Prop(-1, notify=True, signal="currentRowChanged", cast=int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: list[QListWidgetItem] = []
-        self._current_row = -1
-        self._signal_currentRowChanged = BoundSignal(QListWidget.currentRowChanged, self)
-        self._signal_itemClicked = BoundSignal(QListWidget.itemClicked, self)
-
-    @property
-    def currentRowChanged(self):
-        return self._signal_currentRowChanged
-
-    @currentRowChanged.setter
-    def currentRowChanged(self, v):
-        pass
-
-    @property
-    def itemClicked(self):
-        return self._signal_itemClicked
-
-    @itemClicked.setter
-    def itemClicked(self, v):
-        pass
 
     def addItem(self, item):
         if isinstance(item, str):
@@ -1569,7 +1085,7 @@ class QListWidget(QWidget):
 
     def clear(self):
         self._items.clear()
-        self._current_row = -1
+        self.setCurrentRow(-1)
         self._notify("items", [])
 
     def count(self) -> int:
@@ -1578,15 +1094,8 @@ class QListWidget(QWidget):
     def item(self, row: int):
         return self._items[row] if 0 <= row < len(self._items) else None
 
-    def currentRow(self) -> int:
-        return self._current_row
-
-    def setCurrentRow(self, row: int):
-        self._current_row = row
-        self._notify("currentRow", row)
-
     def currentItem(self):
-        return self.item(self._current_row)
+        return self.item(self.currentRow())
 
     def row(self, item):
         try:
@@ -1606,17 +1115,14 @@ class QListWidget(QWidget):
     def _get_props(self) -> dict:
         props = super()._get_props()
         props["items"] = [i.to_dict() for i in self._items]
-        props["currentRow"] = self._current_row
         return props
 
     def _handle_event(self, event_type, value):
         if event_type == "currentRowChanged":
             row = int(value)
-            self._current_row = row
-            self._signal_currentRowChanged.emit(row)
+            self.setCurrentRow(row)
             if 0 <= row < len(self._items):
-                self._signal_itemClicked.emit(self._items[row])
-
+                self.itemClicked.emit(self._items[row])
 
 # ---------------------------------------------------------------------------
 # QSplitter
@@ -1625,34 +1131,30 @@ class QListWidget(QWidget):
 class QSplitter(QWidget):
     _widget_type = "QSplitter"
 
+    orientation = Prop(int(Qt.Horizontal), cast=int)
+
     def __init__(self, orientation=None, parent=None):
         super().__init__(parent)
-        self._orientation = orientation or Qt.Horizontal
+        if orientation is not None:
+            self.setOrientation(orientation)
         self._widgets: list[QWidget] = []
         self._sizes: list[int] = []
 
     def addWidget(self, widget: QWidget):
-        widget._parent = self
+        self._add_child(widget)
         self._widgets.append(widget)
-        if widget not in self._children:
-            self._children.append(widget)
 
     def setSizes(self, sizes: list[int]):
         self._sizes = sizes
-
-    def setOrientation(self, orientation):
-        self._orientation = orientation
 
     def setHandleWidth(self, w: int):
         pass
 
     def _get_props(self) -> dict:
         props = super()._get_props()
-        props["orientation"] = int(self._orientation)
         props["widgetIds"] = [w._wid for w in self._widgets]
         props["sizes"] = self._sizes
         return props
-
 
 # ---------------------------------------------------------------------------
 # QMenuBar / QMenu / QAction / QToolBar / QStatusBar (stubs)
@@ -1661,40 +1163,20 @@ class QSplitter(QWidget):
 class QAction:
     triggered = Signal()
 
+    text = Prop("")
+    enabled = Prop(True, getter="isEnabled")
+    checkable = Prop(False, getter="isCheckable")
+    checked = Prop(False, getter="isChecked")
+
     def __init__(self, *args, parent=None):
-        self._text = args[0] if args and isinstance(args[0], str) else ""
+        self._props: dict = {name: p.default for name, p in self._declared_props.items()}
+        text = args[0] if args and isinstance(args[0], str) else ""
         if len(args) > 1 and isinstance(args[0], (QIcon, str)):
-            self._text = args[1] if len(args) > 1 else ""
+            text = args[1] if len(args) > 1 else ""
+        self._props["text"] = text
         self._icon = QIcon()
-        self._enabled = True
-        self._checkable = False
-        self._checked = False
         self._shortcut = ""
-        self._signal_triggered = BoundSignal(QAction.triggered, self)
         self._parent = parent
-
-    @property
-    def triggered(self):
-        return self._signal_triggered
-
-    @triggered.setter
-    def triggered(self, v):
-        pass
-
-    def setText(self, text: str):
-        self._text = text
-
-    def text(self) -> str:
-        return self._text
-
-    def setEnabled(self, enabled: bool):
-        self._enabled = enabled
-
-    def setCheckable(self, checkable: bool):
-        self._checkable = checkable
-
-    def setChecked(self, checked: bool):
-        self._checked = checked
 
     def setShortcut(self, shortcut):
         self._shortcut = str(shortcut)
@@ -1702,6 +1184,8 @@ class QAction:
     def setIcon(self, icon):
         self._icon = icon
 
+
+_register_props(QAction)
 
 class QMenu(QWidget):
     _widget_type = "QMenu"
@@ -1731,7 +1215,6 @@ class QMenu(QWidget):
     def title(self) -> str:
         return self._title
 
-
 class QMenuBar(QWidget):
     _widget_type = "QMenuBar"
 
@@ -1754,11 +1237,10 @@ class QMenuBar(QWidget):
     def _get_props(self) -> dict:
         props = super()._get_props()
         props["menus"] = [
-            {"title": m._title, "actions": [a._text for a in m._actions]}
+            {"title": m._title, "actions": [a.text() for a in m._actions]}
             for m in self._menus
         ]
         return props
-
 
 class QToolBar(QWidget):
     _widget_type = "QToolBar"
@@ -1777,8 +1259,7 @@ class QToolBar(QWidget):
         pass
 
     def addWidget(self, widget):
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
 
     def setMovable(self, movable: bool):
         pass
@@ -1786,34 +1267,22 @@ class QToolBar(QWidget):
     def setToolButtonStyle(self, style):
         pass
 
-
 class QStatusBar(QWidget):
     _widget_type = "QStatusBar"
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._message = ""
+    message = Prop("", notify=True)
 
     def showMessage(self, msg: str, timeout: int = 0):
-        self._message = msg
-        self._notify("message", msg)
+        self.setMessage(msg)
 
     def clearMessage(self):
-        self._message = ""
-        self._notify("message", "")
+        self.setMessage("")
 
     def addWidget(self, widget, stretch: int = 0):
-        if widget not in self._children:
-            self._children.append(widget)
+        self._add_child(widget)
 
     def addPermanentWidget(self, widget, stretch: int = 0):
         self.addWidget(widget, stretch)
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["message"] = self._message
-        return props
-
 
 # ---------------------------------------------------------------------------
 # QDialog
@@ -1828,28 +1297,11 @@ class QDialog(QWidget):
     accepted = Signal()
     rejected = Signal()
 
+    modal = Prop(True)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._result = QDialog.Rejected
-        self._modal = True
-        self._signal_accepted = BoundSignal(QDialog.accepted, self)
-        self._signal_rejected = BoundSignal(QDialog.rejected, self)
-
-    @property
-    def accepted(self):
-        return self._signal_accepted
-
-    @accepted.setter
-    def accepted(self, v):
-        pass
-
-    @property
-    def rejected(self):
-        return self._signal_rejected
-
-    @rejected.setter
-    def rejected(self, v):
-        pass
 
     def exec(self) -> int:
         self.show()
@@ -1860,22 +1312,13 @@ class QDialog(QWidget):
 
     def accept(self):
         self._result = QDialog.Accepted
-        self._signal_accepted.emit()
+        self.accepted.emit()
         self.hide()
 
     def reject(self):
         self._result = QDialog.Rejected
-        self._signal_rejected.emit()
+        self.rejected.emit()
         self.hide()
-
-    def setModal(self, modal: bool):
-        self._modal = modal
-
-    def _get_props(self) -> dict:
-        props = super()._get_props()
-        props["modal"] = self._modal
-        return props
-
 
 # ---------------------------------------------------------------------------
 # QMessageBox (static methods)
@@ -1929,7 +1372,6 @@ class QMessageBox(QDialog):
         print(f"[MessageBox Question] {title}: {text}")
         return QMessageBox.Yes
 
-
 # ---------------------------------------------------------------------------
 # QButtonGroup
 # ---------------------------------------------------------------------------
@@ -1937,25 +1379,17 @@ class QMessageBox(QDialog):
 class QButtonGroup:
     buttonClicked = Signal(int)
 
+    # Not a QWidget (no `_wid`), but same Prop shape as QListWidgetItem/QFont;
+    # also fixes a missing isExclusive() getter (setter-only before).
+    exclusive = Prop(True, getter="isExclusive")
+
     def __init__(self, parent=None):
+        self._props: dict = {name: p.default for name, p in self._declared_props.items()}
         self._buttons: list[tuple[QWidget, int]] = []
-        self._exclusive = True
         self._parent = parent
-        self._signal_buttonClicked = BoundSignal(QButtonGroup.buttonClicked, self)
-
-    @property
-    def buttonClicked(self):
-        return self._signal_buttonClicked
-
-    @buttonClicked.setter
-    def buttonClicked(self, v):
-        pass
 
     def addButton(self, button, btn_id: int = -1):
         self._buttons.append((button, btn_id))
-
-    def setExclusive(self, exclusive: bool):
-        self._exclusive = exclusive
 
     def button(self, btn_id: int):
         for btn, bid in self._buttons:
@@ -1969,6 +1403,8 @@ class QButtonGroup:
                 return bid
         return -1
 
+
+_register_props(QButtonGroup)
 
 # ---------------------------------------------------------------------------
 # QSizePolicy
@@ -1993,7 +1429,6 @@ class QSizePolicy:
     def setVerticalStretch(self, stretch: int):
         pass
 
-
 # ---------------------------------------------------------------------------
 # QSpacerItem / QWidgetItem
 # ---------------------------------------------------------------------------
@@ -2002,7 +1437,6 @@ class QSpacerItem:
     def __init__(self, w=0, h=0, h_policy=QSizePolicy.Minimum, v_policy=QSizePolicy.Minimum):
         self._w = w
         self._h = h
-
 
 class QWidgetItem:
     def __init__(self, widget):

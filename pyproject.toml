@@ -47,9 +47,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]
-# E501: long lines are fine. F811: widgets intentionally shadow a class-level
-# `Signal` descriptor with an instance `@property` of the same name (Qt idiom).
-ignore = ["E501", "F811"]
+# E501: long lines are fine.
+ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 # In examples, `import pysideweb` MUST come before any PySide6 import (it is imported

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -170,7 +171,13 @@ def _run_server(port: int):
     runner = web.AppRunner(app)
     _server_loop.run_until_complete(runner.setup())
 
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    # Defaults to loopback-only: the WebSocket endpoint has no authentication,
+    # so anything reachable can inspect and drive the app's widget tree.
+    # Binding "0.0.0.0" unconditionally would expose that to the whole LAN
+    # by default. PYSIDEWEB_HOST opts into wider exposure explicitly (e.g.
+    # "0.0.0.0" to reach the app from another device on the network).
+    host = os.environ.get("PYSIDEWEB_HOST", "127.0.0.1")
+    site = web.TCPSite(runner, host, port)
     _server_loop.run_until_complete(site.start())
 
     _server_started.set()

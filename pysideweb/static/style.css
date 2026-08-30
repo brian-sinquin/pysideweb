@@ -1082,6 +1082,34 @@ body {
     display: none !important;
 }
 
+/* Unsupported: a Qt class pysideweb doesn't implement (see interceptor.py's
+   unknown-class fallback). Renders as an empty box either way -- this just
+   makes that visually distinguishable from an intentionally empty QWidget,
+   instead of looking like a silent bug. */
+.widget-unsupported {
+    position: relative;
+    min-height: 1.5em;
+    border: 1px dashed var(--warning);
+    border-radius: var(--border-radius-sm);
+    background: var(--warning-bg);
+}
+
+.widget-unsupported::before {
+    content: attr(title);
+    position: absolute;
+    top: 2px;
+    left: 4px;
+    font-size: 10px;
+    line-height: 1;
+    color: var(--warning);
+    opacity: 0.8;
+    pointer-events: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100% - 8px);
+}
+
 /* Responsive adjustments */
 @media (max-width: 768px) {
     :root {

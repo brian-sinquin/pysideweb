@@ -7,6 +7,37 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Universal fallback for PySide6 API PySideWeb doesn't implement, so third-party PySide6
+  libraries (not just apps written directly against PySideWeb) degrade gracefully instead
+  of crashing: an unimplemented `QtWidgets` class becomes a real, addable/showable
+  `QWidget` placeholder; an unimplemented method on any widget is silently absorbed; an
+  unimplemented value type (`QTransform`, ...) or submodule (`PySide6.QtCharts`, ...) is
+  constructible, chainable, and inert. The renderer marks a placeholder widget visually
+  (dashed outline + class name) so it reads as "unsupported", not as a bug. `core._AutoAttr`
+  is the underlying permissive object; `interceptor.py`'s per-module `__getattr__` (plus a
+  `sys.meta_path` finder for bare `import PySide6.<Something>`) is the entry point.
+  pysideweb's own internal duck typing (`hasattr(widget, "_children")` and similar) is
+  unaffected -- only public, non-underscore-prefixed names are absorbed. Placeholder
+  classes are built with `core._AutoAttrMeta`, so class-level constants referenced without
+  an instance (`QGraphicsView.ScrollHandDrag`, `QAbstractItemView.SelectRows`, ...) are
+  absorbed too, not just instance attribute access.
+- Example: `examples/third_party_widget.py`, a stand-in for a third-party PySide6 library
+  (subclasses `QGraphicsView`, imports from the unstubbed `PySide6.QtCharts`) that
+  demonstrates the universal fallback end to end.
+
+### Security
+- Renderer: `QLabel`/`QPushButton` text containing `<...>` was rendered via `innerHTML`
+  with no sanitization -- text reaching a label often originates from data the app
+  didn't author (a network response, user input echoed back), making this a direct DOM
+  XSS sink even though real Qt's rich-text renderer never executes script. An
+  allowlist-based sanitizer (`sanitizeRichText` in `renderer.js`) now strips
+  non-formatting tags and event-handler/`javascript:` attributes before the HTML is
+  ever assigned.
+- Server: `TCPSite` bound to `0.0.0.0` unconditionally, exposing the unauthenticated
+  `/ws` endpoint (full read/write access to the app's widget tree) to the whole LAN by
+  default. Now defaults to `127.0.0.1`; set `PYSIDEWEB_HOST` to opt into wider exposure.
+
+### Added
 - Examples: `preferences.py` (an application settings screen) and `contacts.py` (a
   master–detail record manager), with a restrained, professional visual style, plus an
   `examples/README.md` index. Replaces the earlier demo set.
