@@ -11,7 +11,6 @@ import inspect
 import os
 import sys
 import threading
-import time
 import webbrowser
 from collections.abc import Callable
 from enum import IntEnum, IntFlag
@@ -140,6 +139,25 @@ class BoundSignal:
 # placeholder instead of a real AttributeError would corrupt that internal
 # bookkeeping. Only public, Qt-API-looking names are absorbed.
 
+def _absorb_ok(name: str) -> bool:
+    """Whether `name` should degrade to a no-op placeholder rather than raise.
+
+    "_"-prefixed (pysideweb internals duck-type on those), isFoo()/hasFoo()
+    predicate names (libraries feature-detect with hasattr -- absorbing makes
+    it always true), and everything under PYSIDEWEB_STRICT are answered with a
+    real AttributeError instead.
+    """
+    if _STRICT or name.startswith("_"):
+        return False
+    # isFoo() / hasFoo() -> let hasattr() see a real miss so feature-detection
+    # takes the unsupported branch instead of silently no-opping.
+    if len(name) > 2 and name.startswith("is") and name[2].isupper():
+        return False
+    if len(name) > 3 and name.startswith("has") and name[3].isupper():
+        return False
+    return True
+
+
 class _AutoAttrMeta(type):
     """Metaclass for placeholder classes: makes CLASS-level attribute access
     (``UnknownClass.SomeEnumMember``, looked up without an instance) permissive
@@ -151,7 +169,7 @@ class _AutoAttrMeta(type):
     kind of unsupported use of it degrades gracefully."""
 
     def __getattr__(cls, name: str):
-        if name.startswith("_"):
+        if not _absorb_ok(name):
             raise AttributeError(name)
         return _AutoAttr()
 
@@ -168,7 +186,7 @@ class _AutoAttr(metaclass=_AutoAttrMeta):
         return self
 
     def __getattr__(self, name: str):
-        if name.startswith("_"):
+        if not _absorb_ok(name):
             raise AttributeError(name)
         return self
 
@@ -1629,7 +1647,9 @@ class QMargins:
 # ---------------------------------------------------------------------------
 
 class QTimer(QObject):
-    """Virtual QTimer using threading."""
+    """Virtual QTimer. One daemon thread per active timer, sleeping on an
+    Event between ticks (the old implementation spawned a fresh threading.Timer
+    -- i.e. a new thread -- on every single tick)."""
 
     timeout = Signal()
 
@@ -1638,7 +1658,8 @@ class QTimer(QObject):
         self._interval = 0
         self._single_shot = False
         self._running = False
-        self._thread: threading.Timer | None = None
+        self._thread: threading.Thread | None = None
+        self._wake = threading.Event()
         self._parent = parent
 
     def setInterval(self, msec: int):
@@ -1656,33 +1677,34 @@ class QTimer(QObject):
     def start(self, msec: int | None = None):
         if msec is not None:
             self._interval = msec
+        if self._running:
+            return
         self._running = True
-        self._schedule()
+        self._wake.clear()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="pysideweb-timer"
+        )
+        self._thread.start()
 
     def stop(self):
         self._running = False
-        if self._thread:
-            self._thread.cancel()
-            self._thread = None
+        self._wake.set()
 
     def isActive(self) -> bool:
         return self._running
 
-    def _schedule(self):
-        if not self._running:
-            return
-        self._thread = threading.Timer(
-            self._interval / 1000.0, self._fire
-        )
-        self._thread.daemon = True
-        self._thread.start()
-
-    def _fire(self):
-        if not self._running:
-            return
-        self.timeout.emit()
-        if not self._single_shot and self._running:
-            self._schedule()
+    def _run(self):
+        delay = max(0.0, self._interval / 1000.0)
+        while self._running:
+            if self._wake.wait(delay):
+                return  # woken by stop()
+            if not self._running:
+                return
+            self.timeout.emit()
+            if self._single_shot:
+                self._running = False
+                return
+            delay = max(0.0, self._interval / 1000.0)  # pick up setInterval()
 
     @staticmethod
     def singleShot(msec: int, slot: Callable):
@@ -1695,19 +1717,62 @@ class QTimer(QObject):
 # QApplication
 # ---------------------------------------------------------------------------
 
-class QApplication:
+class _Clipboard(QObject):
+    """A process-local clipboard. Can't touch the OS clipboard from a headless
+    server, but code that round-trips text through it still works."""
+
+    dataChanged = Signal()
+
+    def __init__(self):
+        super().__init__(None)
+        self._text = ""
+
+    def text(self, *args) -> str:
+        return self._text
+
+    def setText(self, text: str, *args):
+        self._text = str(text)
+        self.dataChanged.emit()
+
+    def clear(self, *args):
+        self._text = ""
+
+    def mimeData(self, *args):
+        return _AutoAttr()
+
+
+class QApplication(QObject):
     """Virtual QApplication — starts the web server and blocks on exec()."""
 
     _instance: QApplication | None = None
+    _clipboard: _Clipboard | None = None
 
-    def __init__(self, argv: list[str] | None = None):
+    aboutToQuit = Signal()
+    lastWindowClosed = Signal()
+
+    def __init__(self, argv: list | None = None):
+        QObject.__init__(self, None)
         QApplication._instance = self
-        self._argv = argv or sys.argv
-        self._windows: list = []
+        self._argv = argv if isinstance(argv, list) else sys.argv
+        self._style_sheet = ""
+        self._name = ""
+        self._display_name = ""
+        self._org = ""
+        self._domain = ""
+        self._font = QFont()
+        self._quit_on_last_window_closed = True
+        self._exit_code = 0
+        self._quit_event = threading.Event()
 
     @staticmethod
     def instance():
         return QApplication._instance
+
+    @staticmethod
+    def clipboard() -> _Clipboard:
+        if QApplication._clipboard is None:
+            QApplication._clipboard = _Clipboard()
+        return QApplication._clipboard
 
     def exec(self) -> int:
         return self.exec_()
@@ -1717,38 +1782,144 @@ class QApplication:
         port = int(os.environ.get("PYSIDEWEB_PORT", "8765"))
         srv.ensure_server_running(port)
 
-        # Open browser
         url = f"http://localhost:{port}"
-        print(f"\n{'='*50}")
+        print(f"\n{'=' * 50}")
         print(f"  PySideWeb running at: {url}")
         print("  Press Ctrl+C to quit")
-        print(f"{'='*50}\n")
+        print(f"{'=' * 50}\n")
         webbrowser.open(url)
 
-        # Block until Ctrl+C
         try:
-            while True:
-                time.sleep(0.1)
+            self._quit_event.wait()
         except KeyboardInterrupt:
-            print("\n[PySideWeb] Shutting down...")
-            return 0
+            pass
+        print("\n[PySideWeb] Shutting down...")
+        try:
+            self.aboutToQuit.emit()
+        except Exception:
+            pass
+        return self._exit_code
 
     @staticmethod
-    def processEvents():
-        pass  # no-op in web mode
+    def quit(code: int = 0):
+        inst = QApplication._instance
+        if inst is not None:
+            inst._exit_code = int(code) if isinstance(code, int) else 0
+            inst._quit_event.set()
+
+    exit = quit
+    closeAllWindows = quit
 
     @staticmethod
-    def quit():
-        sys.exit(0)
+    def processEvents(*args, **kwargs):
+        pass  # no native event loop to pump
+
+    @staticmethod
+    def sendEvent(*args, **kwargs):
+        return False
+
+    postEvent = sendEvent
+
+    # -- app-wide style --
+    def setStyleSheet(self, css: str):
+        self._style_sheet = css or ""
+        state.set_app_stylesheet(self._style_sheet)
+
+    def styleSheet(self) -> str:
+        return self._style_sheet
 
     def setStyle(self, style):
-        pass  # ignore
-
-    def setApplicationName(self, name: str):
         pass
+
+    def style(self):
+        return _AutoAttr()
+
+    # -- app-wide font / palette --
+    def setFont(self, font):
+        self._font = font
+
+    def font(self):
+        return self._font
+
+    def palette(self, *args):
+        return _AutoAttr()
+
+    def setPalette(self, *args):
+        pass
+
+    # -- metadata --
+    def setApplicationName(self, name: str):
+        self._name = name
+
+    def applicationName(self) -> str:
+        return self._name
+
+    def setApplicationDisplayName(self, name: str):
+        self._display_name = name
+
+    def applicationDisplayName(self) -> str:
+        return self._display_name
+
+    def setApplicationVersion(self, v: str):
+        self._version = v
+
+    def setOrganizationName(self, name: str):
+        self._org = name
+
+    def setOrganizationDomain(self, domain: str):
+        self._domain = domain
 
     def setWindowIcon(self, icon):
         pass
 
-    def setApplicationDisplayName(self, name: str):
+    def windowIcon(self):
+        return QIcon()
+
+    def setDesktopFileName(self, name: str):
         pass
+
+    def setQuitOnLastWindowClosed(self, on: bool):
+        self._quit_on_last_window_closed = bool(on)
+
+    def quitOnLastWindowClosed(self) -> bool:
+        return self._quit_on_last_window_closed
+
+    # -- widget / screen queries --
+    @staticmethod
+    def topLevelWidgets():
+        return state.get_roots()
+
+    allWidgets = topLevelWidgets
+
+    @staticmethod
+    def activeWindow():
+        roots = state.get_roots()
+        return roots[-1] if roots else None
+
+    activeModalWidget = activeWindow
+    focusWidget = activeWindow
+
+    @staticmethod
+    def primaryScreen():
+        return _AutoAttr()
+
+    @staticmethod
+    def screens():
+        return [_AutoAttr()]
+
+    @staticmethod
+    def setOverrideCursor(*args):
+        pass
+
+    @staticmethod
+    def restoreOverrideCursor(*args):
+        pass
+
+    @staticmethod
+    def setEffectEnabled(*args):
+        pass
+
+
+# Qt6 keeps QCoreApplication / QGuiApplication distinct; here they're aliases.
+QCoreApplication = QApplication
+QGuiApplication = QApplication

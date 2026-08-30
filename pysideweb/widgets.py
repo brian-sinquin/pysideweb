@@ -12,6 +12,7 @@ from typing import Any
 
 from . import state
 from .core import (
+    _STRICT,
     Prop,
     QFont,
     QIcon,
@@ -19,6 +20,7 @@ from .core import (
     QSize,
     Qt,
     Signal,
+    _absorb_ok,
     _AutoAttr,
     _register_props,
 )
@@ -318,18 +320,25 @@ class QWidget(QObject):
 
         Only reached when normal attribute lookup already failed -- every
         method pysideweb *does* implement (including ones synthesized by
-        Prop()) is found first and never comes through here. Names starting
-        with "_" are excluded and raise normally: pysideweb's own internals
-        rely on hasattr(widget, "_children")-style duck typing, and
-        answering those with a placeholder instead of a real AttributeError
-        would silently corrupt that bookkeeping (see core.py's _AutoAttr
-        docstring). This exists so third-party PySide6 code -- not just
-        code written directly against pysideweb -- can call widget methods
-        pysideweb hasn't gotten around to without crashing the app; the
-        call just becomes a no-op.
+        Prop()) is found first and never comes through here. This lets
+        third-party PySide6 code call widget methods pysideweb hasn't gotten
+        around to without crashing; the call just becomes a no-op.
+
+        Deliberately raised (not absorbed):
+        - "_"-prefixed names -- pysideweb's own hasattr(w, "_children") duck
+          typing must see a real AttributeError.
+        - isFoo()/hasFoo() predicate names -- libraries feature-detect with
+          `if hasattr(w, "setSectionResizeMode")`; absorbing those makes
+          hasattr always true and sends them down the wrong branch. Better to
+          answer False.
+        - everything, when PYSIDEWEB_STRICT=1 (development aid).
         """
         if name.startswith("_"):
             raise AttributeError(name)
+        if _STRICT or not _absorb_ok(name):
+            raise AttributeError(
+                f"{type(self).__name__}.{name} is not implemented by pysideweb"
+            )
         key = f"{type(self).__name__}.{name}"
         if key not in _warned_unknown_methods:
             _warned_unknown_methods.add(key)

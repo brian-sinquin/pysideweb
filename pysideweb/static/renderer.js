@@ -122,6 +122,7 @@
     function handleMessage(msg) {
         if (msg.type === "full_tree") {
             pendingRoots = msg.roots;
+            applyAppStyleSheet(msg.appStyleSheet || "");
             if (!rafId) {
                 rafId = requestAnimationFrame(flushRender);
             }
@@ -1919,6 +1920,23 @@
         style.textContent = translated;
         document.head.appendChild(style);
         el._scopedStyle = style;
+    }
+
+    let _appQssCache = null;
+    function applyAppStyleSheet(css) {
+        if (css === _appQssCache) return;
+        _appQssCache = css;
+        const existing = document.getElementById("pysideweb-app-qss");
+        if (existing) existing.remove();
+        if (!css) return;
+        const translated = css.indexOf("{") === -1
+            ? `#app { ${css} }`
+            : translateQss(css, "#app");
+        if (!translated) return;
+        const style = document.createElement("style");
+        style.id = "pysideweb-app-qss";
+        style.textContent = translated;
+        document.head.appendChild(style);
     }
 
     function removeScopedStyle(el) {
