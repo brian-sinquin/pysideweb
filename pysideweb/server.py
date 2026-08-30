@@ -12,10 +12,16 @@ import json
 import os
 import threading
 from pathlib import Path
-
-from aiohttp import web
+from typing import TYPE_CHECKING
 
 from . import state
+
+if TYPE_CHECKING:
+    from aiohttp import web
+else:
+    # Imported lazily on the server thread (see _run_server) -- `import aiohttp`
+    # costs ~300 ms and we don't want that on the main thread at startup.
+    web = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Globals
@@ -24,6 +30,8 @@ from . import state
 _server_thread: threading.Thread | None = None
 _server_loop: asyncio.AbstractEventLoop | None = None
 _server_started = threading.Event()
+_server_error: str | None = None
+_start_lock = threading.Lock()
 _clients: set[web.WebSocketResponse] = set()
 _static_dir = Path(__file__).parent / "static"
 
@@ -151,8 +159,7 @@ async def index_handler(request: web.Request) -> web.Response:
     return resp
 
 
-@web.middleware
-async def _no_cache_static(request: web.Request, handler):
+async def _no_cache_static(request, handler):
     """The renderer/CSS are edited in place during development and the app is
     long-running; without this the browser serves a stale renderer.js/style.css
     after an update until a hard reload."""
@@ -166,8 +173,8 @@ async def _no_cache_static(request: web.Request, handler):
 # App factory
 # ---------------------------------------------------------------------------
 
-def _create_app() -> web.Application:
-    app = web.Application(middlewares=[_no_cache_static])
+def _create_app():
+    app = web.Application(middlewares=[web.middleware(_no_cache_static)])
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/", index_handler)
     app.router.add_static("/static/", path=str(_static_dir), name="static")
@@ -179,49 +186,70 @@ def _create_app() -> web.Application:
 # ---------------------------------------------------------------------------
 
 def _run_server(port: int):
-    global _server_loop
-
-    _server_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_server_loop)
-
-    app = _create_app()
-    runner = web.AppRunner(app)
-    _server_loop.run_until_complete(runner.setup())
+    global _server_loop, _server_error, web
 
     # Defaults to loopback-only: the WebSocket endpoint has no authentication,
     # so anything reachable can inspect and drive the app's widget tree.
-    # Binding "0.0.0.0" unconditionally would expose that to the whole LAN
-    # by default. PYSIDEWEB_HOST opts into wider exposure explicitly (e.g.
-    # "0.0.0.0" to reach the app from another device on the network).
+    # PYSIDEWEB_HOST opts into wider exposure (e.g. "0.0.0.0").
     host = os.environ.get("PYSIDEWEB_HOST", "127.0.0.1")
-    site = web.TCPSite(runner, host, port)
-    _server_loop.run_until_complete(site.start())
+    try:
+        from aiohttp import web as _web  # ~300 ms; kept off the main thread
+        web = _web
+        _server_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_server_loop)
+        app = _create_app()
+        runner = web.AppRunner(app)
+        _server_loop.run_until_complete(runner.setup())
+        site = web.TCPSite(runner, host, port)
+        _server_loop.run_until_complete(site.start())
+    except OSError as e:
+        _server_error = (
+            f"could not bind {host}:{port} ({e.strerror or e}). "
+            f"Another PySideWeb app is probably already running — stop it, or "
+            f"set PYSIDEWEB_PORT to a free port."
+        )
+        _server_started.set()  # unblock the waiter immediately; no 10s hang
+        return
+    except Exception as e:  # noqa: BLE001 - report anything, don't hang
+        _server_error = f"server failed to start: {e!r}"
+        _server_started.set()
+        return
 
     _server_started.set()
-
-    # Register state change listener
     state.add_change_listener(_on_state_change)
-
-    # Run forever
     _server_loop.run_forever()
 
 
-def ensure_server_running(port: int = 8765):
-    """Start the web server in a daemon thread if not already running."""
-    global _server_thread
+def start_server(port: int = 8765) -> None:
+    """Start the web-server daemon thread if it isn't already running.
+    Non-blocking — importing aiohttp (~300 ms) and binding happen on the
+    thread, so a caller can kick this off early and overlap it with other
+    startup work, then `wait_for_server()` when it actually needs the server."""
+    global _server_thread, _server_error
+    with _start_lock:
+        if _server_thread is not None and _server_thread.is_alive():
+            return
+        _server_error = None
+        _server_started.clear()
+        _server_thread = threading.Thread(
+            target=_run_server, args=(port,), daemon=True, name="pysideweb-server",
+        )
+        _server_thread.start()
 
-    if _server_thread is not None and _server_thread.is_alive():
-        return
 
-    _server_thread = threading.Thread(
-        target=_run_server,
-        args=(port,),
-        daemon=True,
-        name="pysideweb-server",
-    )
-    _server_thread.start()
-
-    # Wait for the server to be ready
-    _server_started.wait(timeout=10.0)
+def wait_for_server(timeout: float = 8.0) -> bool:
+    """Block until the server is listening (or failed). Returns True on success."""
+    _server_started.wait(timeout=timeout)
+    if _server_error is not None:
+        print(f"[PySideWeb] {_server_error}")
+        return False
     if not _server_started.is_set():
-        print("[PySideWeb] WARNING: Server did not start within 10 seconds")
+        print(f"[PySideWeb] WARNING: server did not start within {timeout:.0f}s")
+        return False
+    return True
+
+
+def ensure_server_running(port: int = 8765) -> bool:
+    """Back-compat: start + wait."""
+    start_server(port)
+    return wait_for_server()
