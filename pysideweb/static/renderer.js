@@ -25,6 +25,11 @@
     let pendingRoots = null;
     let rafId = null;
     let renderFallbackId = null;
+    // id -> the node object from the last full_tree. Incremental `updates`
+    // messages patch a prop on the cached node and re-run the widget's
+    // update(el, node), so there is exactly one place that knows how to draw
+    // each widget type (WIDGETS[type].update), not two.
+    let nodesById = {};
     let isFirstRender = true;
     const appEl = document.getElementById("app");
     const statusEl = document.getElementById("connection-status");
@@ -152,142 +157,16 @@
     function applyUpdates(updates) {
         if (!updates) return;
         for (const update of updates) {
+            const node = nodesById[update.id];
             const el = appEl.querySelector(`[data-wid="${update.id}"]`);
-            if (!el) continue;
+            if (!node || !el) continue;
 
-            const prop = update.prop;
-            const val = update.value;
-
-            // Direct DOM property patching
-            if (prop === "text") {
-                if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
-                    if (el.value !== val) {
-                        el.value = val;
-                    }
-                } else if (el.classList.contains("qprogressbar")) {
-                    // Update progress bar fill and text
-                    const fill = el.querySelector(".progress-fill");
-                    const text = el.querySelector(".progress-text");
-                    const min = parseFloat(el.dataset.min ?? 0);
-                    const max = parseFloat(el.dataset.max ?? 100);
-                    const pct = max > min ? ((parseFloat(val) - min) / (max - min)) * 100 : 0;
-                    if (fill) fill.style.width = `${pct}%`;
-                    if (text) text.textContent = `${Math.round(pct)}%`;
-                } else {
-                    // QLabel, QPushButton, etc.
-                    if (val.includes("<") && val.includes(">")) {
-                        el.innerHTML = sanitizeRichText(val);
-                    } else {
-                        // Check if it has a text container child or update directly
-                        const textSpan = el.querySelector("span:not(.btn-icon)");
-                        if (textSpan) {
-                            textSpan.textContent = val;
-                        } else {
-                            el.textContent = val;
-                        }
-                    }
-                }
-            } else if (prop === "value") {
-                if (el.tagName === "INPUT" && el.type === "range") {
-                    el.value = val;
-                    const valLbl = el.parentElement.querySelector(".slider-value");
-                    if (valLbl) valLbl.textContent = val;
-                } else if (el.classList.contains("qprogressbar")) {
-                    const fill = el.querySelector(".progress-fill");
-                    const text = el.querySelector(".progress-text");
-                    const min = parseFloat(el.dataset.min ?? 0);
-                    const max = parseFloat(el.dataset.max ?? 100);
-                    const pct = max > min ? ((parseFloat(val) - min) / (max - min)) * 100 : 0;
-                    if (fill) fill.style.width = `${pct}%`;
-                    if (text) text.textContent = `${Math.round(pct)}%`;
-                } else if (el.classList.contains("qspinbox")) {
-                    const input = el.querySelector("input");
-                    if (input) input.value = val;
-                }
-            } else if (prop === "visible") {
-                if (val) {
-                    el.classList.remove("widget-hidden");
-                } else {
-                    el.classList.add("widget-hidden");
-                }
-            } else if (prop === "enabled") {
-                if (val) {
-                    el.classList.remove("widget-disabled");
-                    if (el.disabled !== undefined) el.disabled = false;
-                } else {
-                    el.classList.add("widget-disabled");
-                    if (el.disabled !== undefined) el.disabled = true;
-                }
-            } else if (prop === "styleSheet") {
-                // Ruleset changes come as a full_tree (setStyleSheet triggers
-                // one) with styleSheetCss precomputed; here we only see a bare
-                // declaration list.
-                applyStyleSheet(el, { props: { styleSheet: val } });
-            } else if (prop === "currentIndex") {
-                if (el.classList.contains("qtabwidget")) {
-                    // Tab layout index switch
-                    const tabItems = el.querySelectorAll(".tab-bar .tab-item");
-                    const tabPages = el.querySelectorAll(".tab-content .tab-page");
-                    tabItems.forEach((item, idx) => {
-                        if (idx === val) item.classList.add("active");
-                        else item.classList.remove("active");
-                    });
-                    tabPages.forEach((page, idx) => {
-                        if (idx === val) page.classList.add("active");
-                        else page.classList.remove("active");
-                    });
-                } else if (el.classList.contains("qstackedwidget")) {
-                    const pages = el.querySelectorAll(".stacked-page");
-                    pages.forEach((page, idx) => {
-                        if (idx === val) page.classList.add("active");
-                        else page.classList.remove("active");
-                    });
-                } else if (el.tagName === "SELECT") {
-                    el.value = val;
-                }
-            } else if (prop === "items") {
-                if (el.tagName === "SELECT") {
-                    el.innerHTML = "";
-                    val.forEach((item, idx) => {
-                        const opt = document.createElement("option");
-                        opt.value = idx;
-                        opt.textContent = item;
-                        el.appendChild(opt);
-                    });
-                } else if (el.classList.contains("qlistwidget")) {
-                    el.innerHTML = "";
-                    val.forEach((item, idx) => {
-                        const row = document.createElement("div");
-                        row.className = "list-item";
-                        if (item.selected) row.classList.add("selected");
-                        if (item.icon) {
-                            const icon = document.createElement("span");
-                            icon.className = "item-icon";
-                            icon.textContent = item.icon;
-                            row.appendChild(icon);
-                        }
-                        const text = document.createElement("span");
-                        text.textContent = item.text || "";
-                        row.appendChild(text);
-                        row.addEventListener("click", () => {
-                            sendEvent(update.id, "currentRowChanged", idx);
-                        });
-                        el.appendChild(row);
-                    });
-                }
-            } else if (prop === "currentRow") {
-                if (el.classList.contains("qlistwidget")) {
-                    const listItems = el.querySelectorAll(".list-item");
-                    listItems.forEach((item, idx) => {
-                        if (idx === val) item.classList.add("selected");
-                        else item.classList.remove("selected");
-                    });
-                }
-            } else if (prop === "message") {
-                if (el.classList.contains("qstatusbar")) {
-                    el.textContent = val;
-                }
-            }
+            // Patch the cached node, then redraw it through the one code path
+            // that knows this widget type. No per-prop DOM surgery here.
+            node.props[update.prop] = update.value;
+            applyCommonProps(el, node);
+            applyWidgetUpdate(el, node);
+            applyPaint(el, node);
         }
     }
 
@@ -298,6 +177,10 @@
 
         // Remember which element is focused and its caret/selection
         const focused = saveFocus();
+
+        // Rebuilt as reconcileNode visits every node; incremental `updates`
+        // then patch these in place.
+        nodesById = {};
 
         // Reconcile each root node with the DOM
         const reconciledRoots = [];
@@ -321,64 +204,49 @@
 
     function reconcileNode(node) {
         if (!node || !node.type) return null;
+        nodesById[node.id] = node;
 
         // Find if the element already exists in the document
         let el = appEl.querySelector(`[data-wid="${node.id}"]`);
-        let isNew = false;
 
         if (!el) {
-            // Create a new element
-            const known = Object.prototype.hasOwnProperty.call(RENDERERS, node.type);
-            el = (known ? RENDERERS[node.type] : renderGenericWidget)(node);
+            const spec = WIDGETS[node.type];
+            el = (spec ? spec.create : renderGenericWidget)(node);
             el.dataset.wid = node.id;
-            // A custom-painted QWidget subclass isn't in RENDERERS but is NOT
+            // A custom-painted QWidget subclass isn't in WIDGETS but is NOT
             // unsupported — it draws itself on a <canvas> (see applyPaint).
-            if (!known && !(node.props && node.props.paint)) {
+            if (!spec && !(node.props && node.props.paint)) {
                 el.classList.add("widget-unsupported");
                 el.title = `${node.type}: not implemented by pysideweb`;
             }
-            isNew = true;
         }
 
-        // Apply common props (both new and existing)
-        el.id = node.props.objectName || node.id;
-
-        if (node.props.visible) {
-            el.classList.remove("widget-hidden");
-        } else {
-            el.classList.add("widget-hidden");
-        }
-
-        if (node.props.enabled) {
-            el.classList.remove("widget-disabled");
-            if (el.disabled !== undefined) el.disabled = false;
-        } else {
-            el.classList.add("widget-disabled");
-            if (el.disabled !== undefined) el.disabled = true;
-        }
-
-        applyStyleSheet(el, node);
-
-        if (node.props.font) {
-            applyFont(el, node.props.font);
-        }
-
-        if (node.props.tooltip) {
-            el.title = node.props.tooltip;
-        } else {
-            el.removeAttribute("title");
-        }
-
-        // Update widget-specific properties that could have changed
-        updateWidgetSpecific(el, node);
-
-        // Custom paintEvent output → <canvas>
-        applyPaint(el, node);
-
-        // Reconcile children
+        applyCommonProps(el, node);
+        applyWidgetUpdate(el, node);
+        applyPaint(el, node);          // custom paintEvent output → <canvas>
         reconcileChildrenForNode(el, node);
 
         return el;
+    }
+
+    // visible / enabled / stylesheet / font / tooltip — shared by the reconcile
+    // pass and the incremental-update pass.
+    function applyCommonProps(el, node) {
+        el.id = node.props.objectName || node.id;
+
+        el.classList.toggle("widget-hidden", !node.props.visible);
+        el.classList.toggle("widget-disabled", !node.props.enabled);
+        if (el.disabled !== undefined) el.disabled = !node.props.enabled;
+
+        applyStyleSheet(el, node);
+        if (node.props.font) applyFont(el, node.props.font);
+        if (node.props.tooltip) el.title = node.props.tooltip;
+        else el.removeAttribute("title");
+    }
+
+    function applyWidgetUpdate(el, node) {
+        const spec = WIDGETS[node.type];
+        if (spec && spec.update) spec.update(el, node);
     }
 
     function reconcileChildrenForNode(el, node) {
@@ -442,73 +310,6 @@
         }
 
         wrapper.replaceChildren(...reconciledElements);
-    }
-
-    function updateWidgetSpecific(el, node) {
-        switch (node.type) {
-            case "QMainWindow":
-                updateMainWindow(el, node);
-                break;
-            case "QPushButton":
-                updatePushButton(el, node);
-                break;
-            case "QLabel":
-                updateLabel(el, node);
-                break;
-            case "QLineEdit":
-            case "QTextEdit":
-                updateLineEdit(el, node);
-                break;
-            case "QComboBox":
-                updateComboBox(el, node);
-                break;
-            case "QCheckBox":
-                updateCheckBox(el, node);
-                break;
-            case "QRadioButton":
-                updateRadioButton(el, node);
-                break;
-            case "QSlider":
-                updateSlider(el, node);
-                break;
-            case "QProgressBar":
-                updateProgressBar(el, node);
-                break;
-            case "QSpinBox":
-            case "QDoubleSpinBox":
-                updateSpinBox(el, node);
-                break;
-            case "QTabWidget":
-                updateTabWidget(el, node);
-                break;
-            case "QGroupBox":
-                updateGroupBox(el, node);
-                break;
-            case "QListWidget":
-                updateListWidget(el, node);
-                break;
-            case "QDial":
-                updateDial(el, node);
-                break;
-            case "QTableWidget":
-                updateTableWidget(el, node);
-                break;
-            case "QTreeWidget":
-                updateTreeWidget(el, node);
-                break;
-            case "QSplitter":
-                updateSplitter(el, node);
-                break;
-            case "QMenuBar":
-                updateMenuBar(el, node);
-                break;
-            case "QStatusBar":
-                updateStatusBar(el, node);
-                break;
-            case "QDialog":
-                updateDialog(el, node);
-                break;
-        }
     }
 
     function updateMainWindow(el, node) {
@@ -961,8 +762,9 @@
     function renderWidget(node) {
         if (!node || !node.type) return null;
 
-        const known = Object.prototype.hasOwnProperty.call(RENDERERS, node.type);
-        const el = (known ? RENDERERS[node.type] : renderGenericWidget)(node);
+        const spec = WIDGETS[node.type];
+        const known = !!spec;
+        const el = (spec ? spec.create : renderGenericWidget)(node);
 
         if (!el) return null;
 
@@ -1044,33 +846,37 @@
 
     // ── Specific Widget Renderers ──────────────────────────────
 
-    const RENDERERS = {
-        QMainWindow: renderMainWindow,
-        QWidget: renderGenericWidget,
-        QFrame: renderFrame,
-        QPushButton: renderPushButton,
-        QLabel: renderLabel,
-        QLineEdit: renderLineEdit,
-        QTextEdit: renderTextEdit,
-        QComboBox: renderComboBox,
-        QCheckBox: renderCheckBox,
-        QRadioButton: renderRadioButton,
-        QSlider: renderSlider,
-        QProgressBar: renderProgressBar,
-        QSpinBox: renderSpinBox,
-        QDoubleSpinBox: renderSpinBox,
-        QTabWidget: renderTabWidget,
-        QGroupBox: renderGroupBox,
-        QScrollArea: renderScrollArea,
-        QStackedWidget: renderStackedWidget,
-        QListWidget: renderListWidget,
-        QDial: renderDial,
-        QTableWidget: renderTableWidget,
-        QTreeWidget: renderTreeWidget,
-        QSplitter: renderSplitter,
-        QMenuBar: renderMenuBar,
-        QStatusBar: renderStatusBar,
-        QDialog: renderDialog,
+    // One entry per widget type: { create(node) -> el, update(el, node) }.
+    // Used for element creation (reconcile + renderWidget), reconcile updates,
+    // and incremental `updates` messages — so there's a single place that
+    // knows how to draw each type, not three that drift apart.
+    const WIDGETS = {
+        QMainWindow:    { create: renderMainWindow,    update: updateMainWindow },
+        QWidget:        { create: renderGenericWidget, update: null },
+        QFrame:         { create: renderFrame,         update: null },
+        QPushButton:    { create: renderPushButton,    update: updatePushButton },
+        QLabel:         { create: renderLabel,         update: updateLabel },
+        QLineEdit:      { create: renderLineEdit,      update: updateLineEdit },
+        QTextEdit:      { create: renderTextEdit,      update: updateLineEdit },
+        QComboBox:      { create: renderComboBox,      update: updateComboBox },
+        QCheckBox:      { create: renderCheckBox,      update: updateCheckBox },
+        QRadioButton:   { create: renderRadioButton,   update: updateRadioButton },
+        QSlider:        { create: renderSlider,        update: updateSlider },
+        QProgressBar:   { create: renderProgressBar,   update: updateProgressBar },
+        QSpinBox:       { create: renderSpinBox,       update: updateSpinBox },
+        QDoubleSpinBox: { create: renderSpinBox,       update: updateSpinBox },
+        QTabWidget:     { create: renderTabWidget,     update: updateTabWidget },
+        QGroupBox:      { create: renderGroupBox,      update: updateGroupBox },
+        QScrollArea:    { create: renderScrollArea,    update: null },
+        QStackedWidget: { create: renderStackedWidget, update: updateStackedWidget },
+        QListWidget:    { create: renderListWidget,    update: updateListWidget },
+        QDial:          { create: renderDial,          update: updateDial },
+        QTableWidget:   { create: renderTableWidget,   update: updateTableWidget },
+        QTreeWidget:    { create: renderTreeWidget,    update: updateTreeWidget },
+        QSplitter:      { create: renderSplitter,      update: updateSplitter },
+        QMenuBar:       { create: renderMenuBar,       update: updateMenuBar },
+        QStatusBar:     { create: renderStatusBar,     update: updateStatusBar },
+        QDialog:        { create: renderDialog,        update: updateDialog },
     };
 
     function renderMainWindow(node) {
