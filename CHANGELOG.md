@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Compatibility
+- **Real `QObject`** at the root of the hierarchy — `objectName`, parent/child ownership,
+  `blockSignals`/`signalsBlocked` (honoured by `Signal.emit`), `sender()`,
+  `setProperty`/`property`, `findChild`/`findChildren`, `installEventFilter`, `inherits()`,
+  `tr()`. `QWidget`, `QTimer` and `QAction` inherit it and the interceptor exports the same
+  class as `QtCore.QObject`, so `isinstance(w, QObject)` and `class Thing(QObject)` work.
+  `QEvent`/`QUrl`/`QModelIndex` are real classes now too.
+- **`QColor`** parses `#rgb` / `#rrggbb` / `#rrggbbaa` and 148 CSS/SVG colour names into
+  real channels (`QColor("#ff8800").red() == 255`), with `getRgb`/`setRgb`/`lighter`/
+  `darker`/`toHsv`/`name(HexArgb)`/`fromRgb*`/`setNamedColor` and channel-based `__eq__`.
+- **Geometry**: `QPoint`/`QRect`/`QSize` gained the operator overloads and methods
+  (`center`, `adjusted`, `contains`, `intersected`, `translated`, `boundedTo`,
+  `manhattanLength`, …); added real `QPointF`/`QRectF`/`QSizeF`/`QLine`/`QLineF` instead of
+  `_AutoAttr` sentinels.
+- **Enums**: complete `Qt.Key`; added `Qt.MouseButton`, `KeyboardModifier`, `ItemDataRole`,
+  `FocusPolicy`, `TextFormat`, `ContextMenuPolicy`, `ConnectionType`, `AspectRatioMode`,
+  `TransformationMode`, `TextElideMode`, `LayoutDirection`. Qt6 scoped access
+  (`Qt.AlignmentFlag.AlignLeft`) works alongside the flat form. Any `Qt.<member>` not
+  shipped returns a stable placeholder instead of raising `AttributeError`.
+- **`QSettings`** — a working shim backed by a JSON file under the user config dir; honours
+  the default passed to `value()`, and persists.
+- **`QApplication`**: `quit()`/`exit()` actually unblock `exec()` (which now emits
+  `aboutToQuit`); added `clipboard()`, app-wide `setStyleSheet()`, `applicationName` /
+  `organizationName`, `setQuitOnLastWindowClosed`, `topLevelWidgets` / `activeWindow`,
+  `primaryScreen` / `screens`. `QCoreApplication` / `QGuiApplication` are aliases.
+- **`QTimer`** uses one daemon thread per active timer instead of spawning a fresh
+  `threading.Timer` (a whole thread) on every tick.
+- `PYSIDEWEB_STRICT=1` makes every unknown-API access raise instead of no-opping.
+  Independently, `isFoo()`/`hasFoo()` predicate names raise from the fallback so
+  `hasattr(w, "hasHeightForWidth")` is `False` and feature-detecting libraries take the
+  right branch.
+- `QAction(*args)` parses all Qt overloads (previously `QAction("Save", win)` stored the
+  parent as the action's text).
+
+### Changed
+- QSS → CSS translation moved from `renderer.js` to `pysideweb/qss.py` (server-side,
+  pytest-covered); behaviour unchanged. Browser-inbound events now ride the same 50 ms
+  broadcast debounce as server-side changes (a browser slider drag no longer round-trips a
+  full tree per pixel). Static assets served with `Cache-Control: no-cache`.
+
 ### Added
 - Widgets: `QDial` (rotary slider, drawn as a draggable SVG dial), `QTableWidget` /
   `QTableWidgetItem` (headers, per-cell items, `cellClicked` selection, editable cells

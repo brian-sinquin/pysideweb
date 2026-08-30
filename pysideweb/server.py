@@ -52,8 +52,14 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 try:
                     event = json.loads(msg.data)
                     state.dispatch_event(event)
-                    # After event dispatch, send updated tree
-                    await _broadcast_tree()
+                    # dispatch_event's signal handlers call state.notify_* which
+                    # pokes the listener -> a debounced broadcast is scheduled.
+                    # (Previously this sent a full tree synchronously per event,
+                    # so a browser-driven slider drag round-tripped the whole
+                    # tree once per pixel.) Nudge the scheduler in case the
+                    # handler changed nothing observable but we still want to
+                    # confirm state to the client.
+                    _schedule_broadcast()
                 except json.JSONDecodeError:
                     pass
                 except Exception as e:
@@ -140,8 +146,20 @@ def _on_state_change():
 # ---------------------------------------------------------------------------
 
 async def index_handler(request: web.Request) -> web.Response:
-    index_path = _static_dir / "index.html"
-    return web.FileResponse(index_path)
+    resp = web.FileResponse(_static_dir / "index.html")
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@web.middleware
+async def _no_cache_static(request: web.Request, handler):
+    """The renderer/CSS are edited in place during development and the app is
+    long-running; without this the browser serves a stale renderer.js/style.css
+    after an update until a hard reload."""
+    resp = await handler(request)
+    if request.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -149,10 +167,9 @@ async def index_handler(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 def _create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[_no_cache_static])
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/", index_handler)
-    # Serve static files
     app.router.add_static("/static/", path=str(_static_dir), name="static")
     return app
 

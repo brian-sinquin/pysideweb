@@ -122,6 +122,7 @@
     function handleMessage(msg) {
         if (msg.type === "full_tree") {
             pendingRoots = msg.roots;
+            applyAppStyleSheet(msg.appStyleSheet || "");
             if (!rafId) {
                 rafId = requestAnimationFrame(flushRender);
             }
@@ -218,7 +219,10 @@
                     if (el.disabled !== undefined) el.disabled = true;
                 }
             } else if (prop === "styleSheet") {
-                applyStyleSheet(el, val);
+                // Ruleset changes come as a full_tree (setStyleSheet triggers
+                // one) with styleSheetCss precomputed; here we only see a bare
+                // declaration list.
+                applyStyleSheet(el, { props: { styleSheet: val } });
             } else if (prop === "currentIndex") {
                 if (el.classList.contains("qtabwidget")) {
                     // Tab layout index switch
@@ -353,7 +357,7 @@
             if (el.disabled !== undefined) el.disabled = true;
         }
 
-        applyStyleSheet(el, node.props.styleSheet || "");
+        applyStyleSheet(el, node);
 
         if (node.props.font) {
             applyFont(el, node.props.font);
@@ -985,8 +989,8 @@
             el.classList.add("widget-disabled");
         }
 
-        if (node.props.styleSheet) {
-            applyStyleSheet(el, node.props.styleSheet);
+        if (node.props.styleSheet || node.props.styleSheetCss) {
+            applyStyleSheet(el, node);
         }
 
         if (node.props.font) {
@@ -1893,32 +1897,43 @@
 
     // ── Style Helpers ──────────────────────────────────────────
 
-    function applyStyleSheet(el, css) {
-        // Clear anything a previous stylesheet put on this element.
+    // Qt Style Sheets are translated to scoped CSS server-side (pysideweb/
+    // qss.py). A widget arrives with node.props.styleSheetCss (already scoped
+    // to `[data-wid="wN"]`) when its stylesheet has rule blocks, or just
+    // node.props.styleSheet for a bare `prop: value` declaration list, which we
+    // apply inline here.
+
+    function applyStyleSheet(el, node) {
+        const props = (node && node.props) || {};
         if (el._appliedStyles) {
             for (const prop of el._appliedStyles) el.style[prop] = "";
         }
         el._appliedStyles = [];
         removeScopedStyle(el);
 
-        if (!css) return;
-
-        if (css.indexOf("{") === -1) {
-            // Bare declaration list (`color: red; font-weight: bold`) — set inline.
-            applyDeclarations(el, css);
-            return;
+        const css = props.styleSheetCss;
+        if (css) {
+            const style = document.createElement("style");
+            style.dataset.qssFor = el.dataset.wid || node.id;
+            style.textContent = css;
+            document.head.appendChild(style);
+            el._scopedStyle = style;
+        } else if (props.styleSheet && props.styleSheet.indexOf("{") === -1) {
+            applyDeclarations(el, props.styleSheet);
         }
+    }
 
-        // Full QSS with selector blocks — translate to scoped CSS and inject.
-        const wid = el.dataset.wid;
-        if (!wid) { applyDeclarations(el, css); return; }
-        const translated = translateQss(css, `[data-wid="${wid}"]`);
-        if (!translated) return;
+    let _appQssCache = null;
+    function applyAppStyleSheet(css) {
+        if (css === _appQssCache) return;
+        _appQssCache = css;
+        const existing = document.getElementById("pysideweb-app-qss");
+        if (existing) existing.remove();
+        if (!css) return;
         const style = document.createElement("style");
-        style.dataset.qssFor = wid;
-        style.textContent = translated;
+        style.id = "pysideweb-app-qss";
+        style.textContent = css;   // already translated server-side
         document.head.appendChild(style);
-        el._scopedStyle = style;
     }
 
     function removeScopedStyle(el) {
@@ -1944,133 +1959,6 @@
                 el._appliedStyles.push(cssProp);
             } catch (e) { /* ignore invalid */ }
         }
-    }
-
-    // ── QSS → CSS ──────────────────────────────────────────────
-    //
-    // Qt Style Sheets are CSS-like but not CSS: `QPushButton:pressed`, sub
-    // controls like `::item` / `::chunk`, and a handful of Qt-only properties.
-    // This turns a widget's stylesheet into real CSS rules scoped to that
-    // widget's subtree (`[data-wid="wN"] ...`) so they neither leak nor need a
-    // per-property inline assignment.
-
-    const QSS_PSEUDO = {
-        pressed: ":active", hover: ":hover", checked: ":checked",
-        unchecked: ":not(:checked)", disabled: ":disabled", enabled: ":enabled",
-        focus: ":focus", "on": ":checked", "off": ":not(:checked)",
-        selected: ".selected", first: ":first-child", last: ":last-child",
-        "read-only": ":read-only", "no-frame": "",
-    };
-
-    // Sub-control → a single descendant selector matching what our renderers
-    // emit. A sub-control we can't map to one element is left out (null) and
-    // the rule is skipped rather than mis-targeted.
-    const QSS_SUBCONTROL = {
-        item: " .list-item",
-        indicator: " input",
-        handle: " input[type=range]",
-        chunk: " .progress-fill",
-        tab: " .tab-item", "tab-bar": " .tab-bar", pane: " .tab-content",
-        title: " .group-title", section: " th",
-        "add-line": null, "sub-line": null, "up-button": null,
-        "down-button": null, "drop-down": null, "up-arrow": null,
-        "down-arrow": null, groove: null, "add-page": null, "sub-page": null,
-    };
-
-    const QSS_DROP_PROPS = /^(qproperty-|subcontrol-|alternate-background-color|gridline-color|show-decoration-selected|selection-color|selection-background-color|titlebar-|button-layout|messagebox-|icon-size$|spacing$)/;
-
-    function translateQss(qss, scope) {
-        // Strip comments.
-        qss = qss.replace(/\/\*[\s\S]*?\*\//g, "");
-        const out = [];
-        const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
-        let m;
-        while ((m = ruleRe.exec(qss)) !== null) {
-            const selectors = m[1].split(",").map(s => s.trim()).filter(Boolean);
-            const body = translateQssBody(m[2]);
-            if (!body) continue;
-            const cssSelectors = [];
-            for (const sel of selectors) {
-                const t = translateQssSelector(sel, scope);
-                if (t) cssSelectors.push(t);
-            }
-            if (cssSelectors.length) {
-                out.push(`${cssSelectors.join(",\n")} { ${body} }`);
-            }
-        }
-        return out.join("\n");
-    }
-
-    function translateQssBody(body) {
-        const keep = [];
-        for (const decl of body.split(";")) {
-            const idx = decl.indexOf(":");
-            if (idx === -1) continue;
-            const prop = decl.slice(0, idx).trim().toLowerCase();
-            const val = decl.slice(idx + 1).trim();
-            if (!prop || !val || QSS_DROP_PROPS.test(prop)) continue;
-            keep.push(`${prop}: ${val}`);
-        }
-        return keep.join("; ");
-    }
-
-    function translateQssSelector(sel, scope) {
-        // Pull off one sub-control (`::item`) and any pseudo-states first.
-        let subControl = "";
-        let unmappedSub = false;
-        sel = sel.replace(/::([a-z-]+)/g, (_, name) => {
-            if (name in QSS_SUBCONTROL) {
-                const mapped = QSS_SUBCONTROL[name];
-                if (mapped === null) unmappedSub = true;
-                else subControl = mapped;
-            } else {
-                unmappedSub = true;
-            }
-            return "";
-        });
-        if (unmappedSub) return "";   // don't mis-target a control we don't model
-
-        let pseudo = "";
-        sel = sel.replace(/:([a-z-]+)/g, (_, name) => {
-            const mapped = QSS_PSEUDO[name];
-            if (mapped === undefined) return "";      // unknown Qt state: drop
-            pseudo += mapped;
-            return "";
-        });
-        sel = sel.trim();
-
-        // Compound chain split on descendant / child combinators.
-        const parts = sel.split(/\s+/).filter(Boolean);
-        const compiled = parts.map(compileCompound);
-        if (compiled.some(p => p === null)) return "";
-        const core = compiled.join(" ") || "*";
-
-        // pseudo is either a real CSS pseudo (":active") or a class our
-        // renderer sets (".selected"); it attaches to the innermost target —
-        // the sub-control if there is one, else the last compound of core.
-        if (subControl) {
-            return `${scope} ${core}${subControl}${pseudo}`;
-        }
-        if (parts.length <= 1) {
-            // Single element: match the host itself and its descendants.
-            return `${scope}${core}${pseudo}, ${scope} ${core}${pseudo}`;
-        }
-        return `${scope} ${core}${pseudo}`;
-    }
-
-    function compileCompound(tok) {
-        if (tok === ">" || tok === "*") return tok;
-        // #objectName
-        let out = "";
-        const idM = tok.match(/#([A-Za-z0-9_-]+)/);
-        if (idM) { out += `#${idM[1]}`; tok = tok.replace(idM[0], ""); }
-        // [attr="v"] — pass through (harmless if it matches nothing)
-        const attrM = tok.match(/\[[^\]]+\]/);
-        if (attrM) { out += attrM[0]; tok = tok.replace(attrM[0], ""); }
-        // .Class or Type  → .lowercase
-        const nameM = tok.match(/\.?([A-Za-z_][A-Za-z0-9_]*)/);
-        if (nameM) out = `.${nameM[1].toLowerCase()}` + out;
-        return out || null;
     }
 
     function applyFont(el, font) {

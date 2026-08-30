@@ -10,14 +10,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import state
+from . import qss, state
 from .core import (
+    _STRICT,
     Prop,
     QFont,
     QIcon,
+    QObject,
     QSize,
     Qt,
     Signal,
+    _absorb_ok,
     _AutoAttr,
     _register_props,
 )
@@ -28,28 +31,25 @@ _warned_unknown_methods: set[str] = set()
 # Base: QWidget
 # ---------------------------------------------------------------------------
 
-class QWidget:
+class QWidget(QObject):
     """Virtual QWidget — base class for all virtual widgets."""
 
     _widget_type = "QWidget"
     _declared_props: dict[str, Prop] = {}
 
     objectName = Prop("", notify=True)
-    styleSheet = Prop("", notify=True)
-    windowTitle = Prop("", notify=True)
+    styleSheet = Prop("")  # setStyleSheet() below forces a full refresh so the
+    windowTitle = Prop("", notify=True)  # server-translated styleSheetCss rides along
     toolTip = Prop("", in_props=False)  # reported under the "tooltip" wire key below
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        _register_props(cls)
-
     def __init__(self, parent=None, flags=None):
+        self._props: dict[str, Any] = {name: p.default for name, p in self._declared_props.items()}
+        QObject.__init__(self, None)  # sets _signals_blocked, _dynamic_props, etc.
         self._wid: str = state.register_widget(self)
         self._parent = parent
         self._children: list[QWidget] = []
         self._layout = None
         self._parent_layout = None
-        self._props: dict[str, Any] = {name: p.default for name, p in self._declared_props.items()}
         self._visible = True
         self._enabled = True
         self._min_size = QSize(0, 0)
@@ -178,6 +178,10 @@ class QWidget:
         return self._geometry[3]
 
     # -- Style --
+    def setStyleSheet(self, css: str):
+        self._raw_set_styleSheet(css or "")
+        state.notify_full_refresh()
+
     def setFont(self, font: QFont):
         self._font = font
         self._notify("font", font.to_css())
@@ -298,6 +302,12 @@ class QWidget:
             "extraClasses": self._extra_classes,
         }
         props.update(self._reflective_props())
+        sheet = props.get("styleSheet", "")
+        if sheet and qss.looks_like_ruleset(sheet):
+            # Translate the QSS ruleset to CSS scoped to this widget's subtree;
+            # the renderer just injects it. A bare declaration list is left for
+            # the renderer to apply inline.
+            props["styleSheetCss"] = qss.translate(sheet, f'[data-wid="{self._wid}"]')
         if self._font and self._font.family():
             props["font"] = self._font.to_css()
         if self._fixed_size:
@@ -320,18 +330,25 @@ class QWidget:
 
         Only reached when normal attribute lookup already failed -- every
         method pysideweb *does* implement (including ones synthesized by
-        Prop()) is found first and never comes through here. Names starting
-        with "_" are excluded and raise normally: pysideweb's own internals
-        rely on hasattr(widget, "_children")-style duck typing, and
-        answering those with a placeholder instead of a real AttributeError
-        would silently corrupt that bookkeeping (see core.py's _AutoAttr
-        docstring). This exists so third-party PySide6 code -- not just
-        code written directly against pysideweb -- can call widget methods
-        pysideweb hasn't gotten around to without crashing the app; the
-        call just becomes a no-op.
+        Prop()) is found first and never comes through here. This lets
+        third-party PySide6 code call widget methods pysideweb hasn't gotten
+        around to without crashing; the call just becomes a no-op.
+
+        Deliberately raised (not absorbed):
+        - "_"-prefixed names -- pysideweb's own hasattr(w, "_children") duck
+          typing must see a real AttributeError.
+        - isFoo()/hasFoo() predicate names -- libraries feature-detect with
+          `if hasattr(w, "setSectionResizeMode")`; absorbing those makes
+          hasattr always true and sends them down the wrong branch. Better to
+          answer False.
+        - everything, when PYSIDEWEB_STRICT=1 (development aid).
         """
         if name.startswith("_"):
             raise AttributeError(name)
+        if _STRICT or not _absorb_ok(name):
+            raise AttributeError(
+                f"{type(self).__name__}.{name} is not implemented by pysideweb"
+            )
         key = f"{type(self).__name__}.{name}"
         if key not in _warned_unknown_methods:
             _warned_unknown_methods.add(key)
@@ -1646,8 +1663,9 @@ class QSplitter(QWidget):
 # QMenuBar / QMenu / QAction / QToolBar / QStatusBar (stubs)
 # ---------------------------------------------------------------------------
 
-class QAction:
+class QAction(QObject):
     triggered = Signal()
+    toggled = Signal(bool)
 
     text = Prop("")
     enabled = Prop(True, getter="isEnabled")
@@ -1655,14 +1673,33 @@ class QAction:
     checked = Prop(False, getter="isChecked")
 
     def __init__(self, *args, parent=None):
+        # Qt overloads: QAction(parent) | QAction(text[, parent])
+        #             | QAction(icon, text[, parent])
         self._props: dict = {name: p.default for name, p in self._declared_props.items()}
-        text = args[0] if args and isinstance(args[0], str) else ""
-        if len(args) > 1 and isinstance(args[0], (QIcon, str)):
-            text = args[1] if len(args) > 1 else ""
+        icon = QIcon()
+        text = ""
+        rest = list(args)
+        if rest and isinstance(rest[0], QIcon):
+            icon = rest.pop(0)
+        if rest and isinstance(rest[0], str):
+            text = rest.pop(0)
+        if rest and parent is None:  # trailing QObject* parent
+            parent = rest.pop(0)
+        QObject.__init__(self, parent)
         self._props["text"] = text
-        self._icon = QIcon()
+        self._icon = icon
         self._shortcut = ""
         self._parent = parent
+
+    def trigger(self):
+        if self.isCheckable():
+            self.setChecked(not self.isChecked())
+            self.toggled.emit(self.isChecked())
+        self.triggered.emit()
+
+    def setChecked(self, checked: bool):
+        self._raw_set_checked(bool(checked))
+        self.toggled.emit(bool(checked))
 
     def setShortcut(self, shortcut):
         self._shortcut = str(shortcut)

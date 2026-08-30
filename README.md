@@ -77,7 +77,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 | Chrome     | `QMenuBar`, `QMenu`, `QAction`, `QToolBar`, `QStatusBar` |
 | Layouts    | `QVBoxLayout`, `QHBoxLayout`, `QGridLayout`, `QFormLayout`, `QStackedLayout` |
 | Painting   | `QPainter`, `QPen`, `QBrush`, `QPainterPath`, `QPolygon`, `QLinearGradient` / `QRadialGradient`, `QImage` / `QPixmap`, `QFontMetrics` |
-| Core       | `Signal`, `Slot`, `QTimer`, `Qt`, `QSize`, `QPoint`, `QRect`, `QColor`, `QFont` |
+| Core       | `QObject`, `Signal`, `Slot`, `QTimer`, `Qt`, `QSize`/`QSizeF`, `QPoint`/`QPointF`, `QRect`/`QRectF`, `QLine`/`QLineF`, `QColor`, `QFont`, `QUrl`, `QModelIndex`, `QSettings` |
 
 Not every Qt method is implemented; PySideWeb targets the common application surface.
 Missing something? [Open an issue](https://github.com/brian-sinquin/pysideweb/issues) or see
@@ -129,6 +129,7 @@ until PySideWeb implements it. If you hit something you'd like supported for rea
 |----------------------|-------------|-------------|
 | `PYSIDEWEB_PORT`     | `8765`       | Port for the HTTP and WebSocket server |
 | `PYSIDEWEB_HOST`     | `127.0.0.1`  | Interface to bind to. The `/ws` endpoint has no authentication, so anything that can reach it can inspect and drive your app's UI — only set this to `0.0.0.0` (or a specific LAN address) if you intend to open the app to other devices on your network, and understand that anyone on that network can then control it. |
+| `PYSIDEWEB_STRICT`  | unset        | When set, any call to a Qt method/class PySideWeb doesn't implement raises `AttributeError` instead of degrading to a no-op, and slot exceptions propagate. Useful while porting an app — turn it off for the graceful-degradation behaviour. |
 
 ## Examples
 

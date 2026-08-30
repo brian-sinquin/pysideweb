@@ -46,10 +46,11 @@ def _build_qtcore_namespace() -> dict[str, Any]:
     ns['Qt'] = core.Qt
     ns['Signal'] = core.Signal
     ns['QTimer'] = core.QTimer
-    ns['QSize'] = core.QSize
-    ns['QPoint'] = core.QPoint
-    ns['QRect'] = core.QRect
-    ns['QMargins'] = core.QMargins
+    for _name in (
+        "QSize", "QSizeF", "QPoint", "QPointF", "QRect", "QRectF",
+        "QLine", "QLineF", "QMargins",
+    ):
+        ns[_name] = getattr(core, _name)
 
     # Slot decorator (no-op in web mode)
     def Slot(*args, **kwargs):
@@ -80,71 +81,12 @@ def _build_qtcore_namespace() -> dict[str, Any]:
 
     ns['Property'] = Property
 
-    # QObject base (maps to QWidget for simplicity)
-    class QObject:
-        def __init__(self, parent=None):
-            self._parent = parent
-
-        def setParent(self, parent):
-            self._parent = parent
-
-        def parent(self):
-            return self._parent
-
-        def deleteLater(self):
-            pass
-
-        def findChild(self, *args):
-            return None
-
-    ns['QObject'] = QObject
-
-    # QEvent
-    class QEvent:
-        def __init__(self, type_=0):
-            self._type = type_
-
-        def type(self):
-            return self._type
-
-        def accept(self):
-            pass
-
-        def ignore(self):
-            pass
-
-    ns['QEvent'] = QEvent
-
-    # QUrl
-    class QUrl:
-        def __init__(self, url: str = ""):
-            self._url = url
-
-        def toString(self) -> str:
-            return self._url
-
-        @staticmethod
-        def fromLocalFile(path: str):
-            return QUrl(f"file:///{path}")
-
-    ns['QUrl'] = QUrl
-
-    # QModelIndex stub
-    class QModelIndex:
-        def __init__(self):
-            self._row = -1
-            self._col = -1
-
-        def row(self) -> int:
-            return self._row
-
-        def column(self) -> int:
-            return self._col
-
-        def isValid(self) -> bool:
-            return self._row >= 0
-
-    ns['QModelIndex'] = QModelIndex
+    # Real object hierarchy + value types (see core.py).
+    ns['QObject'] = core.QObject
+    ns['QEvent'] = core.QEvent
+    ns['QUrl'] = core.QUrl
+    ns['QModelIndex'] = core.QModelIndex
+    ns['QSettings'] = core.QSettings
 
     return ns
 

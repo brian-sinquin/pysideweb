@@ -66,8 +66,13 @@ def _color_to_css(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, QColor):
-        return value.to_css()
+        r, g, b, a = value.red(), value.green(), value.blue(), value.alpha()
+        return f"rgba({r},{g},{b},{a / 255:.3f})"
     if isinstance(value, str):
+        # Resolve names/hex to a stable rgba() so the wire format is uniform.
+        c = QColor(value)
+        if c.isValid():
+            return _color_to_css(c)
         return value
     if isinstance(value, (tuple, list)) and len(value) >= 3:
         r, g, b = value[0], value[1], value[2]

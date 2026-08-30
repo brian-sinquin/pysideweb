@@ -229,6 +229,21 @@ def _serialize_layout_as_container(layout) -> dict:
     return data
 
 
+_app_stylesheet = ""
+
+
+def set_app_stylesheet(css: str) -> None:
+    """Application-wide QSS set via QApplication.setStyleSheet(); the renderer
+    translates and injects it once, unscoped."""
+    global _app_stylesheet
+    _app_stylesheet = css or ""
+    notify_full_refresh()
+
+
+def get_app_stylesheet() -> str:
+    return _app_stylesheet
+
+
 def serialize_full_tree() -> list[dict]:
     """Serialize all root widgets into a JSON tree."""
     roots = get_roots()
@@ -236,7 +251,17 @@ def serialize_full_tree() -> list[dict]:
 
 
 def full_tree_json() -> str:
-    return json.dumps({"type": "full_tree", "roots": serialize_full_tree()})
+    from . import qss
+    app_css = ""
+    if _app_stylesheet:
+        app_css = (qss.translate(_app_stylesheet, "#app")
+                   if qss.looks_like_ruleset(_app_stylesheet)
+                   else f"#app {{ {_app_stylesheet} }}")
+    return json.dumps({
+        "type": "full_tree",
+        "roots": serialize_full_tree(),
+        "appStyleSheetCss": app_css,
+    })
 
 
 # ---------------------------------------------------------------------------
