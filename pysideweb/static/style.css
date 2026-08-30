@@ -1110,6 +1110,13 @@ body {
     max-width: calc(100% - 8px);
 }
 
+/* Virtual painting: canvas produced from a widget's custom paintEvent
+   (see pysideweb/painting.py + applyPaint in renderer.js). */
+.pysideweb-canvas {
+    display: block;
+    max-width: 100%;
+}
+
 /* Responsive adjustments */
 @media (max-width: 768px) {
     :root {

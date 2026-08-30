@@ -268,11 +268,23 @@ class QWidget:
     def property(self, name: str):
         return self._custom_props.get(name)
 
-    def update(self):
+    def update(self, *args):
         state.notify_full_refresh()
 
-    def repaint(self):
+    def repaint(self, *args):
         state.notify_full_refresh()
+
+    # -- Custom painting --
+    def paintEvent(self, event):
+        """Default: nothing custom. A subclass that overrides this is
+        detected during serialization; its drawing is recorded by a virtual
+        QPainter and replayed on a <canvas> in the browser. See
+        pysideweb/painting.py.
+        """
+
+    def _record_paint(self):
+        from .painting import record_widget_paint
+        return record_widget_paint(self)
 
     # -- Internals --
     def _notify(self, prop: str, value: Any):
@@ -294,6 +306,9 @@ class QWidget:
             props["minSize"] = self._min_size.toTuple()
         if self._custom_props:
             props["customProps"] = self._custom_props
+        paint = self._record_paint()
+        if paint is not None:
+            props["paint"] = paint
         return props
 
     def _handle_event(self, event_type: str, value: Any):

@@ -7,6 +7,21 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Virtual `QPainter` pipeline (`pysideweb/painting.py`): a `QWidget` subclass that
+  overrides `paintEvent` now renders for real in the browser instead of as a dashed
+  "unsupported" box. `QPainter` records each drawing call (`drawLine`, `drawRect`,
+  `drawRoundedRect`, `drawEllipse`, `drawArc`/`drawPie`/`drawChord`, `drawPolygon`,
+  `drawPath`, `drawText`, `fillRect`, gradients, the affine transform stack, opacity
+  and clipping) as a JSON command; `renderer.js` replays the list onto an HTML5
+  `<canvas>` sized to the widget. `update()` / `repaint()` re-run `paintEvent`.
+  Supporting value types are real now too — `QPen`, `QBrush`, `QPainterPath`,
+  `QPolygon`/`QPolygonF`, `QLinearGradient`/`QRadialGradient`, `QImage`/`QPixmap` —
+  as are `Qt.PenStyle` / `Qt.BrushStyle` / `Qt.GlobalColor` and `QColor(Qt.red)`-style
+  construction. Pixel readback stays impossible (nothing is rasterized in Python); a
+  broken `paintEvent` is caught and skipped rather than breaking serialization; an
+  unimplemented painter method is absorbed like the rest of pysideweb's unknown API.
+- Example: `examples/custom_paint.py`, a resource monitor with a `QPainter`-drawn
+  circular gauge and a scrolling sparkline, fed by a `QTimer`.
 - Universal fallback for PySide6 API PySideWeb doesn't implement, so third-party PySide6
   libraries (not just apps written directly against PySideWeb) degrade gracefully instead
   of crashing: an unimplemented `QtWidgets` class becomes a real, addable/showable

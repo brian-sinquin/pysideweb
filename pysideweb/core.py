@@ -348,6 +348,61 @@ class _Key(IntEnum):
     Key_A = 0x41
     Key_Z = 0x5a
 
+class _PenStyle(IntEnum):
+    NoPen = 0
+    SolidLine = 1
+    DashLine = 2
+    DotLine = 3
+    DashDotLine = 4
+    DashDotDotLine = 5
+
+class _PenCapStyle(IntEnum):
+    FlatCap = 0x00
+    SquareCap = 0x10
+    RoundCap = 0x20
+
+class _PenJoinStyle(IntEnum):
+    MiterJoin = 0x00
+    BevelJoin = 0x40
+    RoundJoin = 0x80
+
+class _BrushStyle(IntEnum):
+    NoBrush = 0
+    SolidPattern = 1
+    Dense1Pattern = 2
+    Dense2Pattern = 3
+    Dense3Pattern = 4
+    Dense4Pattern = 5
+    Dense5Pattern = 6
+    Dense6Pattern = 7
+    Dense7Pattern = 8
+    HorPattern = 9
+    VerPattern = 10
+    CrossPattern = 11
+    LinearGradientPattern = 15
+
+class _GlobalColor(IntEnum):
+    color0 = 0
+    color1 = 1
+    black = 2
+    white = 3
+    darkGray = 4
+    gray = 5
+    lightGray = 6
+    red = 7
+    green = 8
+    blue = 9
+    cyan = 10
+    magenta = 11
+    yellow = 12
+    darkRed = 13
+    darkGreen = 14
+    darkBlue = 15
+    darkCyan = 16
+    darkMagenta = 17
+    darkYellow = 18
+    transparent = 19
+
 class Qt:
     """Namespace mirroring PySide6.QtCore.Qt.
 
@@ -383,6 +438,7 @@ def _export_enum(namespace: type, enum_cls: type) -> None:
 for _enum_cls in (
     _AlignmentFlag, _Orientation, _CheckState, _ItemFlag, _ScrollBarPolicy,
     _SortOrder, _WindowType, _ToolButtonStyle, _CursorShape, _Key,
+    _PenStyle, _PenCapStyle, _PenJoinStyle, _BrushStyle, _GlobalColor,
 ):
     _export_enum(Qt, _enum_cls)
 _export_enum(Qt.SizePolicy, _SizePolicy)
@@ -451,19 +507,56 @@ class QRect:
     def __repr__(self):
         return f"QRect({self._x}, {self._y}, {self._w}, {self._h})"
 
+# Qt.GlobalColor value -> (r, g, b, a). Mirrors Qt's predefined colours so
+# `QColor(Qt.red)`, `painter.setPen(Qt.blue)`, etc. resolve to real pixels.
+_GLOBAL_COLOR_RGB: dict[int, tuple[int, int, int, int]] = {
+    0: (255, 255, 255, 0),   # color0 (transparent)
+    1: (0, 0, 0, 255),       # color1
+    2: (0, 0, 0, 255),       # black
+    3: (255, 255, 255, 255), # white
+    4: (128, 128, 128, 255), # darkGray
+    5: (160, 160, 164, 255), # gray
+    6: (192, 192, 192, 255), # lightGray
+    7: (255, 0, 0, 255),     # red
+    8: (0, 255, 0, 255),     # green
+    9: (0, 0, 255, 255),     # blue
+    10: (0, 255, 255, 255),  # cyan
+    11: (255, 0, 255, 255),  # magenta
+    12: (255, 255, 0, 255),  # yellow
+    13: (128, 0, 0, 255),    # darkRed
+    14: (0, 128, 0, 255),    # darkGreen
+    15: (0, 0, 128, 255),    # darkBlue
+    16: (0, 128, 128, 255),  # darkCyan
+    17: (128, 0, 128, 255),  # darkMagenta
+    18: (128, 128, 0, 255),  # darkYellow
+    19: (0, 0, 0, 0),        # transparent
+}
+
+
 class QColor:
     def __init__(self, *args):
-        if len(args) == 1 and isinstance(args[0], str):
+        self._r = self._g = self._b = 0
+        self._a = 255
+        self._name = "#000000"
+        if len(args) == 1 and isinstance(args[0], QColor):
+            src = args[0]
+            self._r, self._g, self._b, self._a = src._r, src._g, src._b, src._a
+            self._name = src._name
+        elif len(args) == 1 and isinstance(args[0], str):
             self._name = args[0]
             self._r = self._g = self._b = self._a = 0
+        elif len(args) == 1 and isinstance(args[0], (int, _GlobalColor)):
+            self._r, self._g, self._b, self._a = _GLOBAL_COLOR_RGB.get(
+                int(args[0]), (0, 0, 0, 255)
+            )
+            self._name = self._rgba_str()
         elif len(args) >= 3:
             self._r, self._g, self._b = args[0], args[1], args[2]
             self._a = args[3] if len(args) > 3 else 255
-            self._name = f"rgba({self._r},{self._g},{self._b},{self._a/255:.2f})"
-        else:
-            self._r = self._g = self._b = 0
-            self._a = 255
-            self._name = "#000000"
+            self._name = self._rgba_str()
+
+    def _rgba_str(self) -> str:
+        return f"rgba({self._r},{self._g},{self._b},{self._a / 255:.3f})"
 
     def name(self) -> str:
         return self._name
@@ -472,6 +565,24 @@ class QColor:
     def green(self) -> int: return self._g
     def blue(self) -> int: return self._b
     def alpha(self) -> int: return self._a
+
+    def setAlpha(self, a: int):
+        self._a = a
+        if not (len(self._name) and self._name[0] == "#"):
+            self._name = self._rgba_str()
+
+    def isValid(self) -> bool:
+        return True
+
+    def to_css(self) -> str:
+        """A CSS colour string usable anywhere (canvas fillStyle, style attr)."""
+        return self._name
+
+    def __eq__(self, other):
+        return isinstance(other, QColor) and other._name == self._name
+
+    def __hash__(self):
+        return hash(self._name)
 
     def __repr__(self):
         return f"QColor('{self._name}')"

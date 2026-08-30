@@ -56,6 +56,18 @@ Virtual widget and layout classes. Each widget has:
 - `_get_props()` — returns a JSON-serializable dict of visual state.
 - `_handle_event(type, value)` — applies a browser event and emits the matching signal.
 
+### `painting.py`
+The virtual `QPainter` pipeline. A `QWidget` subclass that overrides `paintEvent`
+doesn't get a native surface — instead `QPainter` **records** every `drawLine` /
+`drawRect` / `drawText` / … call as a small JSON command. During serialization
+`QWidget._get_props()` runs `paintEvent`, collects the command list from the
+`QPainter(self)` the user constructed, and attaches it as `props.paint =
+{commands, w, h}`. `renderer.js` replays those commands onto an HTML5 `<canvas>`
+of the same size. `update()` / `repaint()` re-run `paintEvent` and repaint.
+Also home to the supporting value types (`QPen`, `QBrush`, `QPainterPath`,
+`QPolygon`, `QLinearGradient`, `QImage`/`QPixmap`). Pixel *readback* is still
+impossible — nothing is rasterized on the Python side.
+
 ### `state.py`
 The central registry and protocol layer:
 - Assigns every widget a stable id (`w1`, `w2`, …) and tracks root windows.
@@ -103,7 +115,11 @@ provides the visual theme.
   universal fallback (see `interceptor.py` above) means missing API degrades to an inert
   placeholder instead of crashing, but "doesn't crash" isn't "works" — an unrendered
   third-party widget (a plot, a graphics view, ...) is still just an empty, dashed-outline
-  box until PySideWeb implements a real renderer for it.
+  box until PySideWeb implements a real renderer for it. A widget that draws itself in
+  `paintEvent`, though, renders for real on a `<canvas>` (see `painting.py`).
+- Custom painting is fire-and-forget: `paintEvent` runs on the server thread during
+  serialization, drawing commands are replayed but never rasterized in Python, so
+  `QImage`/`QPixmap` pixel readback and any logic that depends on it can't work.
 - One shared widget tree is broadcast to all connected browsers (no per-session isolation
   yet).
 - QSS/stylesheets are not translated to CSS.
