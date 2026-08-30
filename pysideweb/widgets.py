@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import state
+from . import qss, state
 from .core import (
     _STRICT,
     Prop,
@@ -38,8 +38,8 @@ class QWidget(QObject):
     _declared_props: dict[str, Prop] = {}
 
     objectName = Prop("", notify=True)
-    styleSheet = Prop("", notify=True)
-    windowTitle = Prop("", notify=True)
+    styleSheet = Prop("")  # setStyleSheet() below forces a full refresh so the
+    windowTitle = Prop("", notify=True)  # server-translated styleSheetCss rides along
     toolTip = Prop("", in_props=False)  # reported under the "tooltip" wire key below
 
     def __init__(self, parent=None, flags=None):
@@ -178,6 +178,10 @@ class QWidget(QObject):
         return self._geometry[3]
 
     # -- Style --
+    def setStyleSheet(self, css: str):
+        self._raw_set_styleSheet(css or "")
+        state.notify_full_refresh()
+
     def setFont(self, font: QFont):
         self._font = font
         self._notify("font", font.to_css())
@@ -298,6 +302,12 @@ class QWidget(QObject):
             "extraClasses": self._extra_classes,
         }
         props.update(self._reflective_props())
+        sheet = props.get("styleSheet", "")
+        if sheet and qss.looks_like_ruleset(sheet):
+            # Translate the QSS ruleset to CSS scoped to this widget's subtree;
+            # the renderer just injects it. A bare declaration list is left for
+            # the renderer to apply inline.
+            props["styleSheetCss"] = qss.translate(sheet, f'[data-wid="{self._wid}"]')
         if self._font and self._font.family():
             props["font"] = self._font.to_css()
         if self._fixed_size:

@@ -251,10 +251,16 @@ def serialize_full_tree() -> list[dict]:
 
 
 def full_tree_json() -> str:
+    from . import qss
+    app_css = ""
+    if _app_stylesheet:
+        app_css = (qss.translate(_app_stylesheet, "#app")
+                   if qss.looks_like_ruleset(_app_stylesheet)
+                   else f"#app {{ {_app_stylesheet} }}")
     return json.dumps({
         "type": "full_tree",
         "roots": serialize_full_tree(),
-        "appStyleSheet": _app_stylesheet,
+        "appStyleSheetCss": app_css,
     })
 
 
