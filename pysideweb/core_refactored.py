@@ -10,9 +10,6 @@ from __future__ import annotations
 
 import inspect
 import os
-import sys
-import threading
-import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum, IntFlag
