@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
-from collections.abc import Callable
 
 _lock = threading.RLock()
 
@@ -18,6 +18,7 @@ _lock = threading.RLock()
 @dataclass
 class WidgetRegistry:
     """Centralized widget state management."""
+
     _widgets: dict[str, Any] = field(default_factory=dict)
     _root_widgets: list[Any] = field(default_factory=list)
     _change_queue: list[dict] = field(default_factory=list)
@@ -60,11 +61,9 @@ class WidgetRegistry:
     def notify_change(self, widget_id: str, prop: str, value: Any):
         """Queue property change notification."""
         with _lock:
-            self._change_queue.append({
-                "widget": widget_id,
-                "property": prop,
-                "value": value
-            })
+            self._change_queue.append(
+                {"widget": widget_id, "property": prop, "value": value}
+            )
 
     def get_roots(self) -> list[Any]:
         """Get all root widgets."""
@@ -87,29 +86,39 @@ class WidgetRegistry:
 _registry = WidgetRegistry()
 
 # Public API (backward compat)
+
+
 def register_widget(widget) -> str:
     return _registry.register(widget)
+
 
 def unregister_widget(wid: str):
     return _registry.unregister(wid)
 
+
 def get_widget(wid: str) -> Any:
     return _registry.get(wid)
+
 
 def add_root(widget):
     return _registry.add_root(widget)
 
+
 def remove_root(widget):
     return _registry.remove_root(widget)
+
 
 def get_roots() -> list[Any]:
     return _registry.get_roots()
 
+
 def notify_change(widget_id: str, prop: str, value: Any):
     return _registry.notify_change(widget_id, prop, value)
 
+
 def full_tree_json() -> str:
     return _registry.full_tree_json()
+
 
 def add_listener(callback: Callable):
     return _registry.add_listener(callback)

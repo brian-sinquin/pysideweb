@@ -11,20 +11,18 @@ from __future__ import annotations
 import inspect
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from enum import IntEnum, IntFlag
+from dataclasses import dataclass
 from typing import Any
 from weakref import WeakKeyDictionary
-
-from . import state
 
 # ---------------------------------------------------------------------------
 # Signal / Slot - SIMPLIFIED VERSION
 # ---------------------------------------------------------------------------
 
+
 def _slot_arity(slot: Callable) -> tuple[bool, int]:
     """Precompute slot parameter count once at connect() time.
-    
+
     Returns (accepts_all_args, max_positional_params).
     """
     try:
@@ -47,10 +45,11 @@ _STRICT = bool(os.environ.get("PYSIDEWEB_STRICT"))
 @dataclass
 class SlotBinding:
     """Lightweight binding of a slot with precomputed arity."""
+
     slot: Callable
     accepts_all: bool
     max_params: int
-    
+
     @classmethod
     def create(cls, slot: Callable) -> SlotBinding:
         accepts_all, max_params = _slot_arity(slot)
@@ -59,9 +58,9 @@ class SlotBinding:
 
 class BoundSignal:
     """A signal bound to a specific widget instance."""
-    
-    __slots__ = ('_signal', '_owner', '_slots')
-    
+
+    __slots__ = ("_signal", "_owner", "_slots")
+
     def __init__(self, signal: Signal, owner: Any):
         self._signal = signal
         self._owner = owner
@@ -99,12 +98,12 @@ class BoundSignal:
 
 class Signal:
     """Pure-Python implementation of Qt's Signal/Slot mechanism.
-    
+
     Uses descriptor protocol for clean integration with class definitions.
     """
-    
-    __slots__ = ('_arg_types', '_name', '_instances')
-    
+
+    __slots__ = ("_arg_types", "_name", "_instances")
+
     def __init__(self, *arg_types: type):
         self._arg_types = arg_types
         self._name: str = ""
@@ -132,10 +131,11 @@ def sender() -> Any:
 # Property (simplified from original ~100 LOC to ~40 LOC)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Property:
     """Descriptor for widget properties with optional change notification."""
-    
+
     default: Any = None
     notify: Signal | None = None
     signal: Signal | None = None
@@ -158,15 +158,14 @@ class Property:
         if old != value:
             setattr(obj, self._name, value)
             if self.notify or self.signal:
-                signal = self.notify or self.signal
+                notify_signal = self.notify or self.signal
                 bound = getattr(obj, self._notify_name, None)
                 if bound:
                     bound.emit(value)
 
 
 # ---------------------------------------------------------------------------
-# Qt Core Classes (rest of the file continues as original, 
-# keeping backward compatibility while benefiting from simplified Signal/Slot)
+# Qt Core Classes (rest continues as original for backward compatibility)
 # ---------------------------------------------------------------------------
 
 # Note: QObject, QTimer, QApplication, Qt enums, and value types

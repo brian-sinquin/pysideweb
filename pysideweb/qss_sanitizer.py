@@ -5,17 +5,22 @@ import re
 
 class QSSSanitizer:
     """Sanitize Qt Style Sheets to prevent injection."""
-    
+
     DANGEROUS_DIRECTIVES = {
-        r'@import', r'@font-face', r'@keyframes',
-        r'@media', r'expression\(', r'javascript:',
-        r'behavior:', r'binding:'
+        r"@import",
+        r"@font-face",
+        r"@keyframes",
+        r"@media",
+        r"expression\(",
+        r"javascript:",
+        r"behavior:",
+        r"binding:",
     }
-    
+
     @classmethod
     def sanitize(cls, qss: str) -> str:
         """Remove dangerous directives from QSS."""
-        lines = qss.split('\n')
+        lines = qss.split("\n")
         safe_lines = []
 
         for line in lines:
@@ -28,7 +33,7 @@ class QSSSanitizer:
             if not is_dangerous:
                 safe_lines.append(line)
 
-        return '\n'.join(safe_lines)
+        return "\n".join(safe_lines)
 
     @classmethod
     def is_safe(cls, qss: str) -> bool:
