@@ -158,7 +158,6 @@ class Property:
         if old != value:
             setattr(obj, self._name, value)
             if self.notify or self.signal:
-                notify_signal = self.notify or self.signal
                 bound = getattr(obj, self._notify_name, None)
                 if bound:
                     bound.emit(value)
