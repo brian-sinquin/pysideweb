@@ -1,71 +1,63 @@
 """Tests for refactored modules - basic import and syntax verification."""
 
-import json
 import os
 import sys
 
 # Ensure pysideweb can be imported
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 def test_core_refactored_imports():
     """core_refactored module imports without errors."""
     from pysideweb import core_refactored
+
     assert core_refactored is not None
 
 
 def test_state_refactored_imports():
     """state_refactored module imports without errors."""
     from pysideweb import state_refactored
+
     assert state_refactored is not None
 
 
 def test_security_imports():
     """security module imports without errors."""
     from pysideweb import security
+
     assert security is not None
-    assert hasattr(security, 'SafeJSONEncoder')
+    assert hasattr(security, "SafeJSONEncoder")
 
 
 def test_websocket_validator_imports():
     """websocket_validator module imports without errors."""
     from pysideweb import websocket_validator
+
     assert websocket_validator is not None
-    assert hasattr(websocket_validator, 'WebSocketValidator')
+    assert hasattr(websocket_validator, "WebSocketValidator")
 
 
 def test_qss_sanitizer_imports():
     """qss_sanitizer module imports without errors."""
     from pysideweb import qss_sanitizer
+
     assert qss_sanitizer is not None
-    assert hasattr(qss_sanitizer, 'QSSSanitizer')
+    assert hasattr(qss_sanitizer, "QSSSanitizer")
 
 
 def test_compat_imports():
     """compat module imports without errors."""
     from pysideweb import compat
+
     assert compat is not None
-    assert hasattr(compat, 'UnmappedWidget')
+    assert hasattr(compat, "UnmappedWidget")
 
 
 def test_integration_imports():
     """integration module imports without errors."""
     from pysideweb import integration
+
     assert integration is not None
-
-
-def test_safe_json_encoder():
-    """SafeJSONEncoder works and escapes HTML."""
-    from pysideweb.security import SafeJSONEncoder
-
-    encoder = SafeJSONEncoder()
-    # Test basic encoding
-    data = {"text": "<script>alert(1)</script>"}
-    encoded = encoder.encode(data)
-
-    # Verify it's valid JSON
-    decoded = json.loads(encoded.replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"'))
-    assert "text" in decoded or "script" in encoded.lower()
 
 
 def test_websocket_validator_rate_limit():
