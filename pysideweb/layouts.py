@@ -66,14 +66,20 @@ class QLayout:
         if parent is not None and hasattr(parent, '_layout'):
             parent._layout = self
 
+    def _adopt_widget(self, widget):
+        if hasattr(widget, '_parent_layout'):
+            previous = widget._parent_layout
+            if previous is not None and previous is not self:
+                previous.removeWidget(widget)
+            widget._parent_layout = self
+
     def addWidget(self, widget, stretch: int = 0, alignment: int = 0):
         """Default box-style add: append a plain item. QVBoxLayout/QHBoxLayout use
         this as-is; QGridLayout/QFormLayout/QStackedLayout override it for their
         own item shapes."""
         item = _LayoutItem(widget=widget, stretch=stretch, alignment=alignment)
         self._items.append(item)
-        if hasattr(widget, '_parent_layout'):
-            widget._parent_layout = self
+        self._adopt_widget(widget)
 
     def setSpacing(self, spacing: int):
         self._spacing = spacing
@@ -107,12 +113,23 @@ class QLayout:
     def insertWidget(self, index: int, widget, stretch: int = 0):
         item = _LayoutItem(widget=widget, stretch=stretch)
         self._items.insert(index, item)
+        self._adopt_widget(widget)
 
     def removeWidget(self, widget):
         self._items = [
             item for item in self._items
             if not (hasattr(item, '_widget') and item._widget is widget)
         ]
+        if getattr(widget, '_parent_layout', None) is self:
+            widget._parent_layout = None
+        if hasattr(self, '_rows'):
+            rows = []
+            for label, field in self._rows:
+                label = None if label is widget else label
+                field = None if field is widget else field
+                if label is not None or field is not None:
+                    rows.append((label, field))
+            self._rows = rows
 
     def _get_props(self) -> dict:
         return {
@@ -160,6 +177,7 @@ class QGridLayout(QLayout):
             row_span=row_span, col_span=col_span, alignment=alignment
         )
         self._items.append(item)
+        self._adopt_widget(widget)
 
     def setColumnStretch(self, col: int, stretch: int):
         self._col_stretches[col] = stretch
@@ -206,6 +224,7 @@ class QFormLayout(QLayout):
             item = _LayoutItem(widget=label)
             self._items.append(item)
             self._rows.append((None, label))
+            self._adopt_widget(label)
         else:
             # label (string or widget) + field widget
             from .widgets import QLabel
@@ -218,6 +237,8 @@ class QFormLayout(QLayout):
             self._items.append(item_label)
             self._items.append(item_field)
             self._rows.append((label_widget, field))
+            self._adopt_widget(label_widget)
+            self._adopt_widget(field)
 
     def _get_props(self) -> dict:
         props = super()._get_props()
@@ -244,6 +265,7 @@ class QStackedLayout(QLayout):
     def addWidget(self, widget, stretch: int = 0, alignment: int = 0):
         item = _LayoutItem(widget=widget)
         self._items.append(item)
+        self._adopt_widget(widget)
 
     def setCurrentIndex(self, index: int):
         self._current_index = index

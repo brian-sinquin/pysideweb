@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 
+from .qss_sanitizer import QSSSanitizer
+
 # Qt pseudo-state -> CSS. A value that's a real pseudo (":hover") attaches to
 # the target selector; a bare-class value (".selected") is a class our
 # renderers set. "" drops the state (matches nothing special).
@@ -63,7 +65,7 @@ def translate(qss: str, scope: str) -> str:
     """Translate a QSS ruleset into CSS with every selector prefixed by
     `scope` (e.g. `[data-wid="w7"]` or `#app`). Returns "" if nothing usable
     survived."""
-    qss = _COMMENT.sub("", qss or "")
+    qss = _COMMENT.sub("", QSSSanitizer.sanitize(qss or ""))
     out: list[str] = []
     for sel_group, body_src in _RULE.findall(qss):
         body = _translate_body(body_src)

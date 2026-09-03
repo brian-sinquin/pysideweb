@@ -166,7 +166,9 @@ class QWidget(QObject):
 
     # -- Style --
     def setStyleSheet(self, css: str):
-        self._raw_set_styleSheet(css or "")
+        from ..qss_sanitizer import QSSSanitizer
+
+        self._raw_set_styleSheet(QSSSanitizer.sanitize(css or ""))
         state.notify_full_refresh()
 
     def setFont(self, font: QFont):

@@ -1,52 +1,55 @@
-"""WebSocket message validation and rate limiting."""
+"""Validation helpers used at the WebSocket boundary."""
 
 import hashlib
 import hmac
 import time
-from collections import defaultdict
 
 
 class WebSocketValidator:
-    """Validates WebSocket messages for integrity and rate limits."""
+    """Fixed-window limits; use one instance per connection and release on close.
 
-    def __init__(self, secret_key: str = None):
+    HMAC is available to callers with a shared secret, but the browser protocol
+    does not use it. An absent signature never bypasses a configured secret.
+    """
+
+    def __init__(self, secret_key: str | None = None):
         self.secret_key = secret_key
-        self.client_limits = defaultdict(lambda: {"count": 0, "reset_at": time.time() + 60})
+        self.client_limits = {}
         self.rate_limit_per_minute = 1000
 
-    def validate_signature(self, message: str, signature: str) -> bool:
-        """Verify HMAC-SHA256 signature of message."""
+    def validate_signature(self, message: str, signature: str | None) -> bool:
         if not self.secret_key:
             return True
-
-        expected = hmac.new(
-            self.secret_key.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).hexdigest()
-        return hmac.compare_digest(expected, signature)
+        if not isinstance(signature, str):
+            return False
+        expected = hmac.new(self.secret_key.encode(), message.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected.encode("ascii"), signature.encode("utf-8"))
 
     def check_rate_limit(self, client_id: str) -> bool:
-        """Check if client has exceeded rate limit."""
-        now = time.time()
-        limit_data = self.client_limits[client_id]
-
-        if now > limit_data["reset_at"]:
-            limit_data["count"] = 0
-            limit_data["reset_at"] = now + 60
-
-        if limit_data["count"] >= self.rate_limit_per_minute:
+        now = time.monotonic()
+        count, reset_at = self.client_limits.get(client_id, (0, now + 60))
+        if now >= reset_at:
+            count, reset_at = 0, now + 60
+        if count >= self.rate_limit_per_minute:
             return False
-
-        limit_data["count"] += 1
+        self.client_limits[client_id] = (count + 1, reset_at)
         return True
 
-    def validate_message(self, client_id: str, message: str, signature: str = None) -> tuple[bool, str]:
-        """Validate message: signature + rate limit."""
-        if signature and not self.validate_signature(message, signature):
-            return False, "Invalid signature"
-
+    def validate_message(self, client_id: str, message: str,
+                         signature: str | None = None) -> tuple[bool, str]:
         if not self.check_rate_limit(client_id):
             return False, "Rate limited"
-
+        if not self.validate_signature(message, signature):
+            return False, "Invalid signature"
         return True, "OK"
+
+    @staticmethod
+    def validate_event(event) -> bool:
+        return (
+            isinstance(event, dict)
+            and isinstance(event.get("id"), str)
+            and 0 < len(event["id"]) <= 128
+            and isinstance(event.get("event"), str)
+            and 0 < len(event["event"]) <= 128
+            and not (event.keys() - {"id", "event", "value"})
+        )

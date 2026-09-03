@@ -55,5 +55,7 @@ ignore = ["E501"]
 # for its import-time side effect). Disable import sorting/unused/order rules there so
 # tooling never reorders or removes that line.
 "examples/*" = ["E402", "F401", "I001"]
+"benchmarks/*" = ["E402", "F401", "I001"]
 "tests/*" = ["E402"]
+"tests_browser/*" = ["E402", "F401", "I001"]
 "tests_qt/*" = ["E402"]

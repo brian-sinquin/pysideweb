@@ -1,41 +1,27 @@
-"""QSS/CSS sanitization to prevent injection attacks."""
+"""Conservative policy for the supported QSS subset, not a general CSS parser.
+
+Reject an entire sheet with at-rules, resource URLs, escapes, HTML delimiters,
+or legacy executable CSS. This deliberately disallows external CSS resources.
+Application Python code remains trusted; this is not a sandbox for that code.
+"""
 
 import re
 
 
 class QSSSanitizer:
-    """Sanitize Qt Style Sheets to prevent injection."""
-
-    DANGEROUS_DIRECTIVES = {
-        r"@import",
-        r"@font-face",
-        r"@keyframes",
-        r"@media",
-        r"expression\(",
-        r"javascript:",
-        r"behavior:",
-        r"binding:",
-    }
+    _comments = re.compile(r"/\*.*?\*/", re.DOTALL)
+    _unsafe = re.compile(
+        r"[@\\<>]|url\s*\(|expression\s*\(|javascript\s*:|"
+        r"(?:-moz-)?binding\s*:|behavior\s*:", re.IGNORECASE,
+    )
 
     @classmethod
     def sanitize(cls, qss: str) -> str:
-        """Remove dangerous directives from QSS."""
-        lines = qss.split("\n")
-        safe_lines = []
-
-        for line in lines:
-            # Check for dangerous patterns
-            is_dangerous = any(
-                re.search(pattern, line, re.IGNORECASE)
-                for pattern in cls.DANGEROUS_DIRECTIVES
-            )
-
-            if not is_dangerous:
-                safe_lines.append(line)
-
-        return "\n".join(safe_lines)
+        normalized = cls._comments.sub("", qss or "")
+        if cls._unsafe.search(normalized) or "/*" in normalized:
+            return ""
+        return qss or ""
 
     @classmethod
     def is_safe(cls, qss: str) -> bool:
-        """Check if QSS is safe without modification."""
         return qss == cls.sanitize(qss)

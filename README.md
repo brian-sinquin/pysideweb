@@ -101,6 +101,12 @@ stylesheet neither leaks to other widgets nor needs per-property translation in 
 code. Unmapped Qt-only bits (`qproperty-*`, exotic sub-controls) are dropped rather
 than misapplied. See [examples/data_browser.py](examples/data_browser.py).
 
+Stylesheets support a conservative QSS subset. Sheets containing at-rules,
+`url(...)`, CSS escapes, HTML delimiters, or legacy executable CSS are rejected
+as a whole (including otherwise valid declarations in the same sheet). External
+CSS resources and fonts are therefore unsupported. Rich label text is sanitized
+separately in the browser; JSON encoding is not an HTML sanitizer.
+
 ### Working with third-party PySide6 libraries
 
 PySideWeb is meant to run more than apps written directly against it — including libraries
@@ -114,7 +120,7 @@ degrades to a harmless placeholder instead of crashing your app:
   than looking like a bug) since PySideWeb has no renderer for it.
 - An unimplemented **method** on a widget PySideWeb *does* support, or on one of the
   placeholders above, is silently ignored rather than raising `AttributeError`.
-- An unimplemented **value type** (`QTransform`, `QPen`, ...) or **submodule**
+- An unimplemented **value type** (`QTransform`, ...) or **submodule**
   (`PySide6.QtCharts`, ...) behaves the same way: constructible, chainable, and inert.
 
 The console prints a one-time note the first time each unimplemented name is used, so you
@@ -132,11 +138,32 @@ until PySideWeb implements it. If you hit something you'd like supported for rea
 | `PYSIDEWEB_STRICT`  | unset        | When set, any call to a Qt method/class PySideWeb doesn't implement raises `AttributeError` instead of degrading to a no-op, and slot exceptions propagate. Useful while porting an app — turn it off for the graceful-degradation behaviour. |
 | `PYSIDEWEB_NO_BROWSER` | unset     | When set, `app.exec()` doesn't open a browser tab. Handy for the edit-run loop when you already have the page open. |
 
+### WebSocket boundary
+
+Browser WebSockets must have the same Origin as the application. With a loopback
+binding, HTTP Host names are restricted to `localhost`, `127.0.0.1`, and `::1` to
+reject DNS-rebinding hostnames. Incoming messages are limited to 64 KiB and 1,000
+messages per connection per minute; malformed event envelopes close the socket.
+
+Each client has an independent outbound writer with at most eight pending
+messages and 8 MiB of pending UTF-8 payload, plus one in-flight send. Overflow
+discards stale queued updates and schedules a fresh snapshot. Sends time out
+after five seconds; snapshots exceeding 8 MiB close the connection (code 1009).
+These bounds do not cap total process memory or the number of connections.
+
+These checks are not authentication: non-browser clients can omit Origin, and
+reconnecting resets the connection limit. Shared sessions and network exposure
+still require trusted clients. Reverse-proxy hostname/TLS configuration and
+per-user authentication are planned, not implemented deployment features.
+
 ## Examples
 
 Run any with `uv run python examples/<name>.py`, then open http://localhost:8765.
 See [examples/README.md](examples/README.md) for details.
 
+- [showcase.py](examples/showcase.py) — the comprehensive feature laboratory:
+  six sections covering all renderer widget types, runtime behavior, painting,
+  data editing and compatibility boundaries. See its [tour/test map](examples/showcase.md).
 - [preferences.py](examples/preferences.py) — an application settings screen: grouped
   sections of controls with a Save / Reset action bar.
 - [contacts.py](examples/contacts.py) — a master–detail record manager: a contact list
@@ -152,6 +179,8 @@ See [examples/README.md](examples/README.md) for details.
 - Wider QSS coverage (property selectors, `::` sub-controls we don't model yet)
 - PyPI release
 - Per-session isolation for multiple simultaneous clients
+
+See [the improvement plan](docs/IMPROVEMENT_PLAN.md) for priorities and acceptance criteria.
 
 ## Contributing
 

@@ -13,6 +13,7 @@ uv run python examples/<name>.py
 
 | File | Description |
 |------|-------------|
+| [showcase.py](showcase.py) | Comprehensive six-section feature laboratory: every renderer widget family, data editing, nested layouts, timers/signals, dynamic disposal, painting, QSS, settings, and compatibility boundaries. Start here for the broadest demo; see the [tour and test map](showcase.md). |
 | [preferences.py](preferences.py) | An application settings screen. Grouped sections of labelled controls (line edits, dropdowns, checkboxes, a slider) with a Save / Reset action bar. |
 | [contacts.py](contacts.py) | A master–detail record manager. A contact list on the left, an editable detail form on the right; select, edit, add, and delete records. |
 | [custom_paint.py](custom_paint.py) | A resource monitor whose widgets draw themselves in `paintEvent` with `QPainter` — a circular gauge (arcs, text) and a scrolling sparkline (polyline, gradient fill), animated by a `QTimer`. Demonstrates the virtual painting pipeline: painter calls are recorded and replayed on a `<canvas>`. |

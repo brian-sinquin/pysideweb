@@ -13,6 +13,9 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from .qss_sanitizer import QSSSanitizer
+from .security import SafeJSONEncoder
+
 # ---------------------------------------------------------------------------
 # Global widget registry
 # ---------------------------------------------------------------------------
@@ -20,7 +23,7 @@ from typing import Any
 _lock = threading.Lock()
 _widgets: dict[str, Any] = {}  # id → widget
 _root_widgets: list[Any] = []  # top-level windows
-_change_queue: list[dict] = []
+_change_queue: dict[tuple[str, str], dict] = {}
 _next_id = 0
 _listeners: list[Callable] = []
 
@@ -69,11 +72,14 @@ def unregister_subtree(widget) -> None:
     tab set that creates and discards subtrees would leak one registry
     entry per discarded widget, forever.
     """
+    parent_layout = getattr(widget, "_parent_layout", None)
+    if parent_layout is not None:
+        parent_layout.removeWidget(widget)
     for child in list(getattr(widget, "_children", ())):
         unregister_subtree(child)
     layout = getattr(widget, "_layout", None)
     if layout is not None:
-        for child in _iter_layout_child_widgets(layout):
+        for child in list(_iter_layout_child_widgets(layout)):
             unregister_subtree(child)
     unregister_widget(widget._wid)
 
@@ -103,69 +109,49 @@ def get_roots():
 # Change notification
 # ---------------------------------------------------------------------------
 
-def notify_change(widget_id: str, prop: str, value: Any):
-    """Queue a property change for broadcast."""
+def _queue_change(key: tuple[str, str], change: dict):
     with _lock:
-        _change_queue.append({
-            "type": "update",
-            "id": widget_id,
-            "prop": prop,
-            "value": value,
-        })
-        for listener in _listeners:
-            try:
-                listener()
-            except Exception:
-                pass
+        _change_queue[key] = change
+        listeners = tuple(_listeners)
+    # User callbacks may read state or queue another change. Never hold the
+    # non-reentrant registry lock while invoking them.
+    for listener in listeners:
+        try:
+            listener()
+        except Exception:
+            pass
+
+
+def notify_change(widget_id: str, prop: str, value: Any):
+    """Coalesce repeated property writes before they can fill the queue."""
+    _queue_change((widget_id, prop), {
+        "type": "update", "id": widget_id, "prop": prop, "value": value,
+    })
 
 
 def notify_full_refresh():
     """Signal that a full tree re-render is needed."""
-    with _lock:
-        _change_queue.append({"type": "full_refresh"})
-        for listener in _listeners:
-            try:
-                listener()
-            except Exception:
-                pass
+    _queue_change(("", ""), {"type": "full_refresh"})
 
 
 def drain_changes() -> list[dict]:
-    """Drain all pending changes, coalesced to the latest value per
-    (widget, prop) pair.
-
-    The broadcast loop only runs every _BROADCAST_INTERVAL (~50ms), so a
-    single drain can accumulate many updates to the same property -- a
-    slider mid-drag or text typed character by character both fire a
-    notify_change() per event, but only the last value in a batch is ever
-    going to matter once it reaches the browser. Sending the intermediate
-    ones is pure waste on both ends of the socket. Any `full_refresh`
-    markers are likewise collapsed to at most one.
-    """
+    """Atomically drain the latest value per widget/property and refresh marker."""
     with _lock:
-        changes = list(_change_queue)
+        changes = list(_change_queue.values())
         _change_queue.clear()
-
-    if not changes:
-        return changes
-
-    updates: dict[tuple[str, str], dict] = {}
-    has_full_refresh = False
-    for change in changes:
-        if change.get("type") == "full_refresh":
-            has_full_refresh = True
-        else:
-            updates[(change["id"], change["prop"])] = change
-
-    result = list(updates.values())
-    if has_full_refresh:
-        result.append({"type": "full_refresh"})
-    return result
+    return changes
 
 
 def add_change_listener(listener: Callable):
     with _lock:
-        _listeners.append(listener)
+        if listener not in _listeners:
+            _listeners.append(listener)
+
+
+def remove_change_listener(listener: Callable):
+    with _lock:
+        if listener in _listeners:
+            _listeners.remove(listener)
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +220,9 @@ _app_stylesheet = ""
 
 def set_app_stylesheet(css: str) -> None:
     """Application-wide QSS set via QApplication.setStyleSheet(); the renderer
-    translates and injects it once, unscoped."""
+    receives translated CSS scoped to #app."""
     global _app_stylesheet
-    _app_stylesheet = css or ""
+    _app_stylesheet = QSSSanitizer.sanitize(css or "")
     notify_full_refresh()
 
 
@@ -261,7 +247,7 @@ def full_tree_json() -> str:
         "type": "full_tree",
         "roots": serialize_full_tree(),
         "appStyleSheetCss": app_css,
-    })
+    }, cls=SafeJSONEncoder)
 
 
 # ---------------------------------------------------------------------------

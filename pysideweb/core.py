@@ -7,12 +7,17 @@ Provides Signal/Slot mechanism, Qt namespace (enums/flags), value types
 
 from __future__ import annotations
 
+import heapq
 import inspect
+import itertools
 import os
 import sys
 import threading
+import time
+import weakref
 import webbrowser
 from collections.abc import Callable
+from contextvars import ContextVar
 from enum import IntEnum, IntFlag
 from typing import Any
 
@@ -28,7 +33,6 @@ class Signal:
     def __init__(self, *arg_types: type):
         self._arg_types = arg_types
         self._name: str = ""
-        self._owner: Any = None
 
     def __set_name__(self, owner: type, name: str):
         self._name = name
@@ -57,7 +61,7 @@ def _slot_arity(slot: Callable) -> tuple[bool, int]:
     """
     try:
         sig = inspect.signature(slot)
-    except ValueError:
+    except (TypeError, ValueError):
         return True, 0
     if any(p.kind == p.VAR_POSITIONAL for p in sig.parameters.values()):
         return True, 0
@@ -68,9 +72,13 @@ def _slot_arity(slot: Callable) -> tuple[bool, int]:
     return False, max_params
 
 
-# Stack of signal owners currently emitting, so QObject.sender() can report
-# who invoked the slot that's running (mirrors Qt's QObject::sender()).
-_emit_sender_stack: list = []
+# Signal owner scoped to the emitting context; tokens restore nested emissions.
+_current_sender: ContextVar[Any] = ContextVar("pysideweb_sender", default=None)
+
+
+def sender():
+    """Signal owner in the current thread/context, or None outside emission."""
+    return _current_sender.get()
 
 # Set PYSIDEWEB_STRICT=1 to re-raise slot exceptions (and unknown-API access)
 # instead of swallowing them -- useful while developing an app against pysideweb.
@@ -94,13 +102,13 @@ class BoundSignal:
         if slot is None:
             self._slots.clear()
         else:
-            self._slots = [s for s in self._slots if s[0] is not slot]
+            self._slots = [s for s in self._slots if s[0] != slot]
         return True
 
     def emit(self, *args):
         if getattr(self._owner, "_signals_blocked", False):
             return
-        _emit_sender_stack.append(self._owner)
+        token = _current_sender.set(self._owner)
         try:
             for slot, accepts_all, max_params in self._slots[:]:  # copy: allow modification mid-iteration
                 try:
@@ -110,7 +118,35 @@ class BoundSignal:
                         raise
                     print(f"[PySideWeb] Signal error in {self._signal._name}: {e}")
         finally:
-            _emit_sender_stack.pop()
+            _current_sender.reset(token)
+
+
+class Property(property):
+    """Qt-style property descriptor supporting direct and decorator forms.
+
+    The notify signal is metadata; as in Qt, setters emit it explicitly.
+    """
+
+    def __init__(self, type_=None, fget=None, fset=None, freset=None, doc=None,
+                 notify=None, **metadata):
+        self.type = type_
+        self.notify = notify
+        self.freset = freset
+        self.metadata = metadata
+        super().__init__(fget, fset, None, doc)
+
+    def _copy(self, fget, fset):
+        return type(self)(self.type, fget, fset, self.freset, self.__doc__,
+                          self.notify, **self.metadata)
+
+    def __call__(self, fget):
+        return self.getter(fget)
+
+    def getter(self, fget):
+        return self._copy(fget, self.fset)
+
+    def setter(self, fset):
+        return self._copy(self.fget, fset)
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +458,7 @@ class QObject:
         pass
 
     def sender(self):
-        return _emit_sender_stack[-1] if _emit_sender_stack else None
+        return sender()
 
     @staticmethod
     def tr(text, *args, **kwargs):
@@ -434,6 +470,10 @@ class QObject:
         if len(args) >= 2 and hasattr(args[1], "connect"):
             args[1].connect(args[-1])
         return True
+
+
+# The root class does not run __init_subclass__ for itself.
+_register_props(QObject)
 
 
 def _obj_name(obj) -> str:
@@ -1656,20 +1696,81 @@ class QMargins:
 # QTimer
 # ---------------------------------------------------------------------------
 
+class _TimerScheduler:
+    """One monotonic deadline heap shared by all virtual timers."""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._deadlines: list[tuple[float, int, weakref.ReferenceType, int]] = []
+        self._sequence = itertools.count()
+        self._thread: threading.Thread | None = None
+
+    def schedule(self, timer, generation: int, delay: float):
+        deadline = time.monotonic() + max(0.0, delay)
+        with self._condition:
+            heapq.heappush(
+                self._deadlines,
+                (deadline, next(self._sequence), weakref.ref(timer), generation),
+            )
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run, daemon=True, name="pysideweb-timers",
+                )
+                self._thread.start()
+            self._condition.notify()
+
+    def cancel(self, timer):
+        with self._condition:
+            # Generations make stale entries harmless. Compact in batches so
+            # frequent start/stop remains O(1) instead of rebuilding the heap
+            # for every timer operation, while long-delay cancellations cannot
+            # grow the heap without bound.
+            if len(self._deadlines) < 1024:
+                self._condition.notify()
+                return
+            retained = [
+                entry for entry in self._deadlines
+                if (candidate := entry[2]()) is not None
+                and candidate is not timer
+                and candidate._running
+                and candidate._generation == entry[3]
+            ]
+            if len(retained) != len(self._deadlines):
+                self._deadlines = retained
+                heapq.heapify(self._deadlines)
+                self._condition.notify()
+
+    def _run(self):
+        while True:
+            with self._condition:
+                while not self._deadlines:
+                    self._condition.wait()
+                deadline, _, timer_ref, generation = self._deadlines[0]
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    self._condition.wait(remaining)
+                    continue
+                heapq.heappop(self._deadlines)
+            timer = timer_ref()
+            if timer is not None:
+                timer._fire(generation)
+
+
+_timer_scheduler = _TimerScheduler()
+
+
 class QTimer(QObject):
-    """Virtual QTimer. One daemon thread per active timer, sleeping on an
-    Event between ticks (the old implementation spawned a fresh threading.Timer
-    -- i.e. a new thread -- on every single tick)."""
+    """Virtual QTimer using the process-wide monotonic scheduler thread."""
 
     timeout = Signal()
+    _single_shots: set[QTimer] = set()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._interval = 0
         self._single_shot = False
         self._running = False
-        self._thread: threading.Thread | None = None
-        self._wake = threading.Event()
+        self._generation = 0
         self._parent = parent
 
     def setInterval(self, msec: int):
@@ -1687,40 +1788,43 @@ class QTimer(QObject):
     def start(self, msec: int | None = None):
         if msec is not None:
             self._interval = msec
-        if self._running:
-            return
+        _timer_scheduler.cancel(self)
         self._running = True
-        self._wake.clear()
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="pysideweb-timer"
+        self._generation += 1
+        _timer_scheduler.schedule(
+            self, self._generation, max(0.001, self._interval / 1000.0),
         )
-        self._thread.start()
 
     def stop(self):
         self._running = False
-        self._wake.set()
+        self._generation += 1
+        _timer_scheduler.cancel(self)
+        self._single_shots.discard(self)
 
     def isActive(self) -> bool:
         return self._running
 
-    def _run(self):
-        delay = max(0.0, self._interval / 1000.0)
-        while self._running:
-            if self._wake.wait(delay):
-                return  # woken by stop()
-            if not self._running:
-                return
-            self.timeout.emit()
-            if self._single_shot:
-                self._running = False
-                return
-            delay = max(0.0, self._interval / 1000.0)  # pick up setInterval()
+    def _fire(self, generation: int):
+        if not self._running or generation != self._generation:
+            return
+        self.timeout.emit()
+        if not self._running or generation != self._generation:
+            return
+        if self._single_shot:
+            self._running = False
+            self._generation += 1
+            self._single_shots.discard(self)
+            return
+        _timer_scheduler.schedule(
+            self, generation, max(0.001, self._interval / 1000.0),
+        )
 
     @staticmethod
     def singleShot(msec: int, slot: Callable):
         t = QTimer()
         t.setSingleShot(True)
         t.timeout.connect(slot)
+        QTimer._single_shots.add(t)
         t.start(msec)
 
 # ---------------------------------------------------------------------------

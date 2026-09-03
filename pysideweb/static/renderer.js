@@ -23,6 +23,7 @@
     let ws = null;
     let reconnectDelay = RECONNECT_DELAY;
     let pendingRoots = null;
+    let pendingUpdates = [];
     let rafId = null;
     let renderFallbackId = null;
     // id -> the node object from the last full_tree. Incremental `updates`
@@ -30,12 +31,8 @@
     // update(el, node), so there is exactly one place that knows how to draw
     // each widget type (WIDGETS[type].update), not two.
     let nodesById = {};
-    let isFirstRender = true;
     const appEl = document.getElementById("app");
     const statusEl = document.getElementById("connection-status");
-
-    // Element cache: widgetId → DOM element (for focused-input preservation)
-    const focusCache = new Map();
 
     // ── Rich text sanitization ────────────────────────────────
     //
@@ -127,7 +124,9 @@
     function handleMessage(msg) {
         if (msg.type === "full_tree") {
             pendingRoots = msg.roots;
-            applyAppStyleSheet(msg.appStyleSheet || "");
+            // A newer full tree supersedes updates queued for an older one.
+            pendingUpdates = [];
+            applyAppStyleSheet(msg.appStyleSheetCss || "");
             if (!rafId) {
                 rafId = requestAnimationFrame(flushRender);
             }
@@ -140,8 +139,14 @@
                 renderFallbackId = setTimeout(flushRender, 100);
             }
         } else if (msg.type === "updates") {
-            // Apply property updates directly (no rAF delay or DOM rebuild)
-            applyUpdates(msg.updates);
+            if (pendingRoots) {
+                // The initial/full render is deferred to requestAnimationFrame.
+                // Preserve updates received before that frame and apply them
+                // immediately after the tree has built nodesById + the DOM.
+                pendingUpdates.push(...(msg.updates || []));
+            } else {
+                applyUpdates(msg.updates);
+            }
         }
     }
 
@@ -151,6 +156,11 @@
         if (pendingRoots) {
             renderTree(pendingRoots);
             pendingRoots = null;
+            if (pendingUpdates.length) {
+                const updates = pendingUpdates;
+                pendingUpdates = [];
+                applyUpdates(updates);
+            }
         }
     }
 
@@ -192,10 +202,6 @@
         // replaceChildren on appEl with the reconciled root elements
         appEl.replaceChildren(...reconciledRoots);
 
-        if (isFirstRender) {
-            isFirstRender = false;
-        }
-
         // Restore focus + caret position
         restoreFocus(focused);
     }
@@ -209,17 +215,7 @@
         // Find if the element already exists in the document
         let el = appEl.querySelector(`[data-wid="${node.id}"]`);
 
-        if (!el) {
-            const spec = WIDGETS[node.type];
-            el = (spec ? spec.create : renderGenericWidget)(node);
-            el.dataset.wid = node.id;
-            // A custom-painted QWidget subclass isn't in WIDGETS but is NOT
-            // unsupported — it draws itself on a <canvas> (see applyPaint).
-            if (!spec && !(node.props && node.props.paint)) {
-                el.classList.add("widget-unsupported");
-                el.title = `${node.type}: not implemented by pysideweb`;
-            }
-        }
+        if (!el) el = createWidgetElement(node);
 
         applyCommonProps(el, node);
         applyWidgetUpdate(el, node);
@@ -241,7 +237,9 @@
         applyStyleSheet(el, node);
         if (node.props.font) applyFont(el, node.props.font);
         if (node.props.tooltip) el.title = node.props.tooltip;
-        else el.removeAttribute("title");
+        else if (!WIDGETS[node.type] && !node.props.paint) {
+            el.title = `${node.type}: not implemented by pysideweb`;
+        } else el.removeAttribute("title");
     }
 
     function applyWidgetUpdate(el, node) {
@@ -381,8 +379,7 @@
             if (iconSpan) {
                 iconSpan.textContent = node.props.icon;
             } else {
-                const newIcon = document.createElement("span");
-                newIcon.className = "btn-icon";
+                const newIcon = makeElement("span", "btn-icon");
                 newIcon.textContent = node.props.icon;
                 el.prepend(newIcon);
             }
@@ -470,31 +467,11 @@
         }
     }
 
-    function updateRadioButton(el, node) {
-        const input = el.querySelector("input");
-        if (input) {
-            input.checked = node.props.checked || false;
-        }
-        const textSpan = el.querySelector("span");
-        if (textSpan) {
-            textSpan.textContent = node.props.text || "";
-        }
-    }
 
     function updateSlider(el, node) {
-        const input = el.querySelector("input");
-        if (input) {
-            input.min = node.props.minimum ?? 0;
-            input.max = node.props.maximum ?? 99;
-            if (document.activeElement !== input) {
-                input.value = node.props.value ?? 0;
-            }
-            input.step = node.props.singleStep ?? 1;
-        }
+        updateSpinBox(el, node);
         const valueLabel = el.querySelector(".slider-value");
-        if (valueLabel) {
-            valueLabel.textContent = node.props.value ?? 0;
-        }
+        if (valueLabel) valueLabel.textContent = node.props.value ?? 0;
     }
 
     function updateProgressBar(el, node) {
@@ -516,8 +493,7 @@
             if (text) {
                 text.textContent = `${Math.round(pct)}%`;
             } else {
-                const newText = document.createElement("span");
-                newText.className = "progress-text";
+                const newText = makeElement("span", "progress-text");
                 newText.textContent = `${Math.round(pct)}%`;
                 el.appendChild(newText);
             }
@@ -549,12 +525,10 @@
         tabBar.innerHTML = "";
         for (let i = 0; i < tabs.length; i++) {
             const tab = tabs[i];
-            const tabItem = document.createElement("div");
-            tabItem.className = "tab-item" + (i === currentIndex ? " active" : "");
+            const tabItem = makeElement("div", "tab-item" + (i === currentIndex ? " active" : ""));
 
             if (tab.icon) {
-                const icon = document.createElement("span");
-                icon.className = "tab-icon";
+                const icon = makeElement("span", "tab-icon");
                 icon.textContent = tab.icon;
                 tabItem.appendChild(icon);
             }
@@ -573,15 +547,15 @@
         content.className = "tab-content";
         if (!content.parentElement) el.appendChild(content);
 
-        let pages = content.querySelectorAll(".tab-page");
+        let pages = content.querySelectorAll(":scope > .tab-page");
         while (pages.length < tabs.length) {
-            const page = document.createElement("div");
+            const page = makeElement("div", "tab-page");
             content.appendChild(page);
-            pages = content.querySelectorAll(".tab-page");
+            pages = content.querySelectorAll(":scope > .tab-page");
         }
         while (pages.length > tabs.length) {
             pages[pages.length - 1].remove();
-            pages = content.querySelectorAll(".tab-page");
+            pages = content.querySelectorAll(":scope > .tab-page");
         }
 
         for (let i = 0; i < tabs.length; i++) {
@@ -607,8 +581,7 @@
             if (title) {
                 title.textContent = node.props.title;
             } else {
-                const newTitle = document.createElement("span");
-                newTitle.className = "group-title";
+                const newTitle = makeElement("span", "group-title");
                 newTitle.textContent = node.props.title;
                 el.prepend(newTitle);
             }
@@ -619,16 +592,16 @@
 
     function updateStackedWidget(el, node) {
         const currentIndex = node.props.currentIndex ?? 0;
-        let pages = el.querySelectorAll(".stacked-page");
+        let pages = el.querySelectorAll(":scope > .stacked-page");
         
         while (pages.length < node.children.length) {
-            const page = document.createElement("div");
+            const page = makeElement("div", "stacked-page");
             el.appendChild(page);
-            pages = el.querySelectorAll(".stacked-page");
+            pages = el.querySelectorAll(":scope > .stacked-page");
         }
         while (pages.length > node.children.length) {
             pages[pages.length - 1].remove();
-            pages = el.querySelectorAll(".stacked-page");
+            pages = el.querySelectorAll(":scope > .stacked-page");
         }
 
         for (let i = 0; i < node.children.length; i++) {
@@ -650,12 +623,10 @@
         el.innerHTML = "";
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
-            const row = document.createElement("div");
-            row.className = "list-item" + (i === currentRow ? " selected" : "");
+            const row = makeElement("div", "list-item" + (i === currentRow ? " selected" : ""));
 
             if (item.icon) {
-                const icon = document.createElement("span");
-                icon.className = "item-icon";
+                const icon = makeElement("span", "item-icon");
                 icon.textContent = item.icon;
                 row.appendChild(icon);
             }
@@ -684,8 +655,7 @@
         const menus = node.props.menus || [];
         el.innerHTML = "";
         for (const menu of menus) {
-            const item = document.createElement("div");
-            item.className = "menu-item";
+            const item = makeElement("div", "menu-item");
             item.textContent = menu.title || "";
             el.appendChild(item);
         }
@@ -724,10 +694,8 @@
 
         return {
             wid,
-            tag: active.tagName,
             selStart: active.selectionStart ?? null,
             selEnd: active.selectionEnd ?? null,
-            value: active.value ?? null,
         };
     }
 
@@ -759,52 +727,25 @@
 
     // ── Widget Renderers ───────────────────────────────────────
 
+    function makeElement(tag, className) {
+        const el = document.createElement(tag);
+        el.className = className;
+        return el;
+    }
+
+    function createWidgetElement(node) {
+        const spec = WIDGETS[node.type];
+        const el = (spec ? spec.create : renderGenericWidget)(node);
+        el.dataset.wid = node.id;
+        if (!spec && !node.props.paint) el.classList.add("widget-unsupported");
+        return el;
+    }
+
     function renderWidget(node) {
         if (!node || !node.type) return null;
-
-        const spec = WIDGETS[node.type];
-        const known = !!spec;
-        const el = (spec ? spec.create : renderGenericWidget)(node);
-
-        if (!el) return null;
-
-        // A type pysideweb doesn't implement (third-party PySide6 code
-        // routinely uses classes far outside pysideweb's supported set --
-        // see interceptor.py's unknown-class fallback) still renders --
-        // as an empty box via renderGenericWidget -- but is marked so it's
-        // visually distinguishable from an intentionally empty QWidget
-        // rather than looking like a bug.
-        if (!known && !(node.props && node.props.paint)) {
-            el.classList.add("widget-unsupported");
-            el.title = `${node.type}: not implemented by pysideweb`;
-        }
-
-        // Apply common props
-        el.dataset.wid = node.id;
-        el.id = node.props.objectName || node.id;
-
-        if (!node.props.visible) {
-            el.classList.add("widget-hidden");
-        }
-
-        if (!node.props.enabled) {
-            el.classList.add("widget-disabled");
-        }
-
-        if (node.props.styleSheet || node.props.styleSheetCss) {
-            applyStyleSheet(el, node);
-        }
-
-        if (node.props.font) {
-            applyFont(el, node.props.font);
-        }
-
-        if (node.props.tooltip) {
-            el.title = node.props.tooltip;
-        }
-
+        const el = createWidgetElement(node);
+        applyCommonProps(el, node);
         applyPaint(el, node);
-
         return el;
     }
 
@@ -820,8 +761,7 @@
 
         for (const child of node.children) {
             if (child.type === "Stretch") {
-                const spacer = document.createElement("div");
-                spacer.className = "stretch-spacer";
+                const spacer = makeElement("div", "stretch-spacer");
                 if (child.props && child.props.factor > 1) {
                     spacer.style.flex = child.props.factor;
                 }
@@ -859,8 +799,8 @@
         QLineEdit:      { create: renderLineEdit,      update: updateLineEdit },
         QTextEdit:      { create: renderTextEdit,      update: updateLineEdit },
         QComboBox:      { create: renderComboBox,      update: updateComboBox },
-        QCheckBox:      { create: renderCheckBox,      update: updateCheckBox },
-        QRadioButton:   { create: renderRadioButton,   update: updateRadioButton },
+        QCheckBox:      { create: renderToggle,      update: updateCheckBox },
+        QRadioButton:   { create: node => renderToggle(node, true),   update: updateCheckBox },
         QSlider:        { create: renderSlider,        update: updateSlider },
         QProgressBar:   { create: renderProgressBar,   update: updateProgressBar },
         QSpinBox:       { create: renderSpinBox,       update: updateSpinBox },
@@ -871,8 +811,8 @@
         QStackedWidget: { create: renderStackedWidget, update: updateStackedWidget },
         QListWidget:    { create: renderListWidget,    update: updateListWidget },
         QDial:          { create: renderDial,          update: updateDial },
-        QTableWidget:   { create: renderTableWidget,   update: updateTableWidget },
-        QTreeWidget:    { create: renderTreeWidget,    update: updateTreeWidget },
+        QTableWidget:   { create: renderTableWidget,   update: buildTable },
+        QTreeWidget:    { create: renderTreeWidget,    update: buildTree },
         QSplitter:      { create: renderSplitter,      update: updateSplitter },
         QMenuBar:       { create: renderMenuBar,       update: updateMenuBar },
         QStatusBar:     { create: renderStatusBar,     update: updateStatusBar },
@@ -880,69 +820,22 @@
     };
 
     function renderMainWindow(node) {
-        const el = document.createElement("div");
-        el.className = "qmainwindow";
-
-        // Title bar
-        const titleBar = document.createElement("div");
-        titleBar.className = "window-title-bar";
-
-        const dots = document.createElement("div");
-        dots.className = "window-dots";
+        const el = makeElement("div", "qmainwindow");
+        const titleBar = makeElement("div", "window-title-bar");
+        const dots = makeElement("div", "window-dots");
         dots.innerHTML = `<span class="window-dot close"></span><span class="window-dot minimize"></span><span class="window-dot maximize"></span>`;
         titleBar.appendChild(dots);
-
-        const title = document.createElement("span");
-        title.className = "window-title";
-        title.textContent = node.props.windowTitle || "PySideWeb Application";
+        const title = makeElement("span", "window-title");
         titleBar.appendChild(title);
-
         el.appendChild(titleBar);
-
-        // Menu bar
-        const menuBarNode = node.children.find(c => c.type === "QMenuBar");
-        if (menuBarNode) {
-            el.appendChild(renderMenuBar(menuBarNode));
-        }
-
-        // Content area
-        const content = document.createElement("div");
-        content.className = "window-content";
-
-        const centralId = node.props.centralWidgetId;
-        if (centralId) {
-            const centralNode = node.children.find(c => c.id === centralId);
-            if (centralNode) {
-                const centralEl = renderWidget(centralNode);
-                if (centralEl) {
-                    centralEl.style.width = "100%";
-                    centralEl.style.height = "100%";
-                    content.appendChild(centralEl);
-                }
-            }
-        } else {
-            for (const child of node.children) {
-                if (child.type !== "QMenuBar" && child.type !== "QStatusBar") {
-                    const childEl = renderWidget(child);
-                    if (childEl) content.appendChild(childEl);
-                }
-            }
-        }
-
+        const content = makeElement("div", "window-content");
         el.appendChild(content);
-
-        // Status bar
-        const statusNode = node.children.find(c => c.type === "QStatusBar");
-        if (statusNode) {
-            el.appendChild(renderStatusBar(statusNode));
-        }
-
+        updateMainWindow(el, node);
         return el;
     }
 
     function renderGenericWidget(node) {
-        const el = document.createElement("div");
-        el.className = "qwidget";
+        const el = makeElement("div", "qwidget");
 
         if (node.props.extraClasses) {
             for (const cls of node.props.extraClasses) {
@@ -973,70 +866,23 @@
     }
 
     function renderPushButton(node) {
-        const btn = document.createElement("button");
-        btn.className = "qpushbutton";
-
-        if (node.props.flat) btn.classList.add("flat");
-        if (node.props.extraClasses) {
-            for (const cls of node.props.extraClasses) {
-                btn.classList.add(cls);
-            }
-        }
-
-        if (node.props.icon) {
-            const icon = document.createElement("span");
-            icon.className = "btn-icon";
-            icon.textContent = node.props.icon;
-            btn.appendChild(icon);
-        }
-
-        if (node.props.text) {
-            const text = document.createElement("span");
-            text.textContent = node.props.text;
-            btn.appendChild(text);
-        }
-
-        if (!node.props.enabled) {
-            btn.disabled = true;
-        }
-
-        btn.addEventListener("click", () => {
-            sendEvent(node.id, "clicked", null);
-        });
-
+        const btn = makeElement("button", "qpushbutton");
+        for (const cls of node.props.extraClasses || []) btn.classList.add(cls);
+        btn.disabled = !node.props.enabled;
+        updatePushButton(btn, node);
+        btn.addEventListener("click", () => sendEvent(node.id, "clicked", null));
         return btn;
     }
 
     function renderLabel(node) {
-        const el = document.createElement("span");
-        el.className = "qlabel";
-
-        if (node.props.extraClasses) {
-            for (const cls of node.props.extraClasses) {
-                el.classList.add(cls);
-            }
-        }
-
-        const text = node.props.text || "";
-        if (text.includes("<") && text.includes(">")) {
-            el.innerHTML = sanitizeRichText(text);
-        } else {
-            el.textContent = text;
-        }
-
-        applyAlignment(el, node.props.alignment);
-
-        if (node.props.wordWrap) {
-            el.style.wordWrap = "break-word";
-            el.style.whiteSpace = "normal";
-        }
-
+        const el = makeElement("span", "qlabel");
+        for (const cls of node.props.extraClasses || []) el.classList.add(cls);
+        updateLabel(el, node);
         return el;
     }
 
     function renderLineEdit(node) {
-        const input = document.createElement("input");
-        input.className = "qlineedit";
+        const input = makeElement("input", "qlineedit");
         input.type = node.props.echoMode === 2 ? "password" : "text";
         input.value = node.props.text || "";
         input.placeholder = node.props.placeholder || "";
@@ -1062,8 +908,7 @@
     }
 
     function renderTextEdit(node) {
-        const textarea = document.createElement("textarea");
-        textarea.className = "qtextedit";
+        const textarea = makeElement("textarea", "qtextedit");
         textarea.value = node.props.text || "";
         textarea.placeholder = node.props.placeholder || "";
 
@@ -1077,73 +922,29 @@
     }
 
     function renderComboBox(node) {
-        const select = document.createElement("select");
-        select.className = "qcombobox";
-
-        const items = node.props.items || [];
-        const currentIndex = node.props.currentIndex ?? -1;
-
-        for (let i = 0; i < items.length; i++) {
-            const option = document.createElement("option");
-            option.value = i;
-            option.textContent = items[i];
-            if (i === currentIndex) option.selected = true;
-            select.appendChild(option);
-        }
-
-        select.addEventListener("change", (e) => {
+        const select = makeElement("select", "qcombobox");
+        updateComboBox(select, node);
+        select.addEventListener("change", e => {
             sendEvent(node.id, "currentIndexChanged", e.target.value);
         });
-
         return select;
     }
 
-    function renderCheckBox(node) {
-        const label = document.createElement("label");
-        label.className = "qcheckbox";
-
+    function renderToggle(node, radio = false) {
+        const label = makeElement("label", radio ? "qradiobutton" : "qcheckbox");
         const input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = node.props.checked || false;
-
-        input.addEventListener("change", (e) => {
-            sendEvent(node.id, "toggled", e.target.checked);
-        });
-
+        input.type = radio ? "radio" : "checkbox";
+        if (radio) input.name = node.props.objectName ? `radio_${node.props.objectName}` : "radio_group";
+        input.addEventListener("change", e => sendEvent(node.id, "toggled", e.target.checked));
         label.appendChild(input);
-
-        const text = document.createElement("span");
-        text.textContent = node.props.text || "";
-        label.appendChild(text);
-
+        label.appendChild(document.createElement("span"));
+        updateCheckBox(label, node);
         return label;
     }
 
-    function renderRadioButton(node) {
-        const label = document.createElement("label");
-        label.className = "qradiobutton";
-
-        const input = document.createElement("input");
-        input.type = "radio";
-        input.name = node.props.objectName ? `radio_${node.props.objectName}` : `radio_group`;
-        input.checked = node.props.checked || false;
-
-        input.addEventListener("change", (e) => {
-            sendEvent(node.id, "toggled", e.target.checked);
-        });
-
-        label.appendChild(input);
-
-        const text = document.createElement("span");
-        text.textContent = node.props.text || "";
-        label.appendChild(text);
-
-        return label;
-    }
 
     function renderSlider(node) {
-        const container = document.createElement("div");
-        container.className = "qslider";
+        const container = makeElement("div", "qslider");
 
         const input = document.createElement("input");
         input.type = "range";
@@ -1152,8 +953,7 @@
         input.value = node.props.value ?? 0;
         input.step = node.props.singleStep ?? 1;
 
-        const valueLabel = document.createElement("span");
-        valueLabel.className = "slider-value";
+        const valueLabel = makeElement("span", "slider-value");
         valueLabel.textContent = node.props.value ?? 0;
 
         input.addEventListener("input", (e) => {
@@ -1175,36 +975,15 @@
     }
 
     function renderProgressBar(node) {
-        const container = document.createElement("div");
-        container.className = "qprogressbar";
-
-        const min = node.props.minimum ?? 0;
-        const max = node.props.maximum ?? 100;
-        const val = node.props.value ?? 0;
-        const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
-
-        container.dataset.min = min;
-        container.dataset.max = max;
-
-        const fill = document.createElement("div");
-        fill.className = "progress-fill";
-        fill.style.width = `${pct}%`;
-
+        const container = makeElement("div", "qprogressbar");
+        const fill = makeElement("div", "progress-fill");
         container.appendChild(fill);
-
-        if (node.props.textVisible !== false) {
-            const text = document.createElement("span");
-            text.className = "progress-text";
-            text.textContent = `${Math.round(pct)}%`;
-            container.appendChild(text);
-        }
-
+        updateProgressBar(container, node);
         return container;
     }
 
     function renderSpinBox(node) {
-        const container = document.createElement("div");
-        container.className = "qspinbox";
+        const container = makeElement("div", "qspinbox");
 
         const input = document.createElement("input");
         input.type = "number";
@@ -1213,20 +992,18 @@
         input.value = node.props.value ?? 0;
         input.step = node.props.singleStep ?? 1;
 
-        const btnDown = document.createElement("button");
-        btnDown.className = "spin-btn";
+        const btnDown = makeElement("button", "spin-btn");
         btnDown.textContent = "\u2212";
         btnDown.addEventListener("click", () => {
-            const newVal = Math.max(parseInt(input.min), parseInt(input.value) - parseInt(input.step));
+            const newVal = Math.max(parseFloat(input.min), parseFloat(input.value) - parseFloat(input.step));
             input.value = newVal;
             sendEvent(node.id, "valueChanged", newVal);
         });
 
-        const btnUp = document.createElement("button");
-        btnUp.className = "spin-btn";
+        const btnUp = makeElement("button", "spin-btn");
         btnUp.textContent = "+";
         btnUp.addEventListener("click", () => {
-            const newVal = Math.min(parseInt(input.max), parseInt(input.value) + parseInt(input.step));
+            const newVal = Math.min(parseFloat(input.max), parseFloat(input.value) + parseFloat(input.step));
             input.value = newVal;
             sendEvent(node.id, "valueChanged", newVal);
         });
@@ -1243,83 +1020,20 @@
     }
 
     function renderTabWidget(node) {
-        const el = document.createElement("div");
-        el.className = "qtabwidget";
-
-        const tabs = node.props.tabs || [];
-        const currentIndex = node.props.currentIndex ?? 0;
-
-        // Tab bar
-        const tabBar = document.createElement("div");
-        tabBar.className = "tab-bar";
-
-        for (let i = 0; i < tabs.length; i++) {
-            const tab = tabs[i];
-            const tabItem = document.createElement("div");
-            tabItem.className = "tab-item" + (i === currentIndex ? " active" : "");
-
-            if (tab.icon) {
-                const icon = document.createElement("span");
-                icon.className = "tab-icon";
-                icon.textContent = tab.icon;
-                tabItem.appendChild(icon);
-            }
-
-            const text = document.createTextNode(tab.text || `Tab ${i + 1}`);
-            tabItem.appendChild(text);
-
-            tabItem.addEventListener("click", () => {
-                sendEvent(node.id, "currentChanged", i);
-            });
-
-            tabBar.appendChild(tabItem);
-        }
-
-        el.appendChild(tabBar);
-
-        // Tab content
-        const content = document.createElement("div");
-        content.className = "tab-content";
-
-        for (let i = 0; i < tabs.length; i++) {
-            const page = document.createElement("div");
-            page.className = "tab-page" + (i === currentIndex ? " active" : "");
-
-            const childNode = node.children.find(c => c.id === tabs[i].widgetId);
-            if (childNode) {
-                const childEl = renderWidget(childNode);
-                if (childEl) {
-                    childEl.style.height = "100%";
-                    page.appendChild(childEl);
-                }
-            }
-
-            content.appendChild(page);
-        }
-
-        el.appendChild(content);
-
+        const el = makeElement("div", "qtabwidget");
+        updateTabWidget(el, node);
         return el;
     }
 
     function renderGroupBox(node) {
-        const el = document.createElement("div");
-        el.className = "qgroupbox";
-
-        if (node.props.title) {
-            const title = document.createElement("span");
-            title.className = "group-title";
-            title.textContent = node.props.title;
-            el.appendChild(title);
-        }
-
+        const el = makeElement("div", "qgroupbox");
+        updateGroupBox(el, node);
         renderChildren(el, node);
         return el;
     }
 
     function renderScrollArea(node) {
-        const el = document.createElement("div");
-        el.className = "qscrollarea";
+        const el = makeElement("div", "qscrollarea");
 
         if (node.children && node.children.length > 0) {
             for (const child of node.children) {
@@ -1332,54 +1046,14 @@
     }
 
     function renderStackedWidget(node) {
-        const el = document.createElement("div");
-        el.className = "qstackedwidget";
-
-        const currentIndex = node.props.currentIndex ?? 0;
-
-        for (let i = 0; i < node.children.length; i++) {
-            const page = document.createElement("div");
-            page.className = "stacked-page" + (i === currentIndex ? " active" : "");
-
-            const childEl = renderWidget(node.children[i]);
-            if (childEl) page.appendChild(childEl);
-
-            el.appendChild(page);
-        }
-
+        const el = makeElement("div", "qstackedwidget");
+        updateStackedWidget(el, node);
         return el;
     }
 
     function renderListWidget(node) {
-        const el = document.createElement("div");
-        el.className = "qlistwidget";
-
-        const items = node.props.items || [];
-        const currentRow = node.props.currentRow ?? -1;
-
-        for (let i = 0; i < items.length; i++) {
-            const item = items[i];
-            const row = document.createElement("div");
-            row.className = "list-item" + (i === currentRow ? " selected" : "");
-
-            if (item.icon) {
-                const icon = document.createElement("span");
-                icon.className = "item-icon";
-                icon.textContent = item.icon;
-                row.appendChild(icon);
-            }
-
-            const text = document.createElement("span");
-            text.textContent = item.text || "";
-            row.appendChild(text);
-
-            row.addEventListener("click", () => {
-                sendEvent(node.id, "currentRowChanged", i);
-            });
-
-            el.appendChild(row);
-        }
-
+        const el = makeElement("div", "qlistwidget");
+        updateListWidget(el, node);
         return el;
     }
 
@@ -1396,8 +1070,7 @@
     }
 
     function renderDial(node) {
-        const el = document.createElement("div");
-        el.className = "qdial";
+        const el = makeElement("div", "qdial");
         el.innerHTML = `
             <svg viewBox="0 0 100 100" class="qdial-svg">
                 <circle class="qdial-track" cx="50" cy="50" r="42"></circle>
@@ -1464,8 +1137,7 @@
         const curRow = node.props.currentRow ?? -1;
         const curCol = node.props.currentColumn ?? -1;
 
-        const table = document.createElement("table");
-        table.className = "qtable";
+        const table = makeElement("table", "qtable");
 
         if (hHeaders.length || vHeaders.length) {
             const thead = document.createElement("thead");
@@ -1514,15 +1186,11 @@
     }
 
     function renderTableWidget(node) {
-        const el = document.createElement("div");
-        el.className = "qtablewidget";
+        const el = makeElement("div", "qtablewidget");
         buildTable(el, node);
         return el;
     }
 
-    function updateTableWidget(el, node) {
-        buildTable(el, node);
-    }
 
     // ── QTreeWidget ────────────────────────────────────────────
 
@@ -1532,11 +1200,9 @@
         el.replaceChildren();
 
         if (headers.length) {
-            const head = document.createElement("div");
-            head.className = "qtree-head";
+            const head = makeElement("div", "qtree-head");
             for (const h of headers) {
-                const c = document.createElement("span");
-                c.className = "qtree-hcell";
+                const c = makeElement("span", "qtree-hcell");
                 c.textContent = h;
                 head.appendChild(c);
             }
@@ -1546,12 +1212,10 @@
         const makeRows = (items, path, depth, container) => {
             items.forEach((it, i) => {
                 const here = path.concat(i);
-                const rowEl = document.createElement("div");
-                rowEl.className = "qtree-row" + (it.selected ? " selected" : "");
+                const rowEl = makeElement("div", "qtree-row" + (it.selected ? " selected" : ""));
                 rowEl.style.paddingLeft = (depth * 16 + 6) + "px";
 
-                const twisty = document.createElement("span");
-                twisty.className = "qtree-twisty";
+                const twisty = makeElement("span", "qtree-twisty");
                 if (it.children && it.children.length) {
                     twisty.textContent = it.expanded ? "▾" : "▸";
                     twisty.addEventListener("click", (e) => {
@@ -1564,8 +1228,7 @@
                 rowEl.appendChild(twisty);
 
                 (it.texts && it.texts.length ? it.texts : [""]).forEach((t, ci) => {
-                    const cell = document.createElement("span");
-                    cell.className = "qtree-cell";
+                    const cell = makeElement("span", "qtree-cell");
                     cell.textContent = t;
                     cell.addEventListener("click", () => {
                         sendEvent(node.id, "itemClicked", { path: here, col: ci });
@@ -1580,26 +1243,20 @@
             });
         };
 
-        const body = document.createElement("div");
-        body.className = "qtree-body";
+        const body = makeElement("div", "qtree-body");
         makeRows(tree, [], 0, body);
         el.appendChild(body);
     }
 
     function renderTreeWidget(node) {
-        const el = document.createElement("div");
-        el.className = "qtreewidget";
+        const el = makeElement("div", "qtreewidget");
         buildTree(el, node);
         return el;
     }
 
-    function updateTreeWidget(el, node) {
-        buildTree(el, node);
-    }
 
     function renderSplitter(node) {
-        const el = document.createElement("div");
-        el.className = "qsplitter";
+        const el = makeElement("div", "qsplitter");
 
         if (node.props.orientation === 2) {
             el.classList.add("vertical");
@@ -1614,23 +1271,13 @@
     }
 
     function renderMenuBar(node) {
-        const el = document.createElement("div");
-        el.className = "qmenubar";
-
-        const menus = node.props.menus || [];
-        for (const menu of menus) {
-            const item = document.createElement("div");
-            item.className = "menu-item";
-            item.textContent = menu.title || "";
-            el.appendChild(item);
-        }
-
+        const el = makeElement("div", "qmenubar");
+        updateMenuBar(el, node);
         return el;
     }
 
     function renderStatusBar(node) {
-        const el = document.createElement("div");
-        el.className = "qstatusbar";
+        const el = makeElement("div", "qstatusbar");
         el.textContent = node.props.message || "";
 
         if (node.children) {
@@ -1644,14 +1291,12 @@
     }
 
     function renderDialog(node) {
-        const overlay = document.createElement("div");
-        overlay.className = "qdialog-overlay";
+        const overlay = makeElement("div", "qdialog-overlay");
         if (!node.props.visible) {
             overlay.classList.add("widget-hidden");
         }
 
-        const dialog = document.createElement("div");
-        dialog.className = "qdialog";
+        const dialog = makeElement("div", "qdialog");
         overlay.appendChild(dialog);
 
         renderChildren(dialog, node);

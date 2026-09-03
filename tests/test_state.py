@@ -79,3 +79,53 @@ def test_doubly_nested_layouts_serialize():
         return out
 
     assert "deep" in texts(tree["roots"][0])
+
+
+def test_listener_can_read_state_without_deadlock():
+    import threading
+
+    widget = QWidget()
+    observed = []
+
+    def listener():
+        observed.append(state.get_widget(widget._wid))
+
+    state.add_change_listener(listener)
+    state.add_change_listener(listener)
+    worker = threading.Thread(target=lambda: state.notify_change(widget._wid, 'text', 'x'),
+                              daemon=True)
+    try:
+        worker.start()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert observed == [widget]
+    finally:
+        state.remove_change_listener(listener)
+
+
+def test_pending_changes_coalesce_before_drain():
+    state.drain_changes()
+    for value in range(10000):
+        state.notify_change('w1', 'value', value)
+    assert len(state._change_queue) == 1
+    assert state.drain_changes() == [
+        {'type': 'update', 'id': 'w1', 'prop': 'value', 'value': 9999},
+    ]
+
+
+def test_delete_later_detaches_widget_from_layout_and_tree():
+    root = QWidget()
+    layout = QVBoxLayout(root)
+    survivor = QLabel("keep")
+    deleted = QLabel("remove")
+    layout.addWidget(survivor)
+    layout.addWidget(deleted)
+    root.show()
+
+    deleted.deleteLater()
+
+    assert layout.count() == 1
+    assert deleted._parent_layout is None
+    assert state.get_widget(deleted._wid) is None
+    tree = json.loads(state.full_tree_json())
+    assert [child["props"]["text"] for child in tree["roots"][0]["children"]] == ["keep"]

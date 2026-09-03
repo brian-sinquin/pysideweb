@@ -6,6 +6,69 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Runtime integration fixes
+
+- Add a comprehensive six-section showcase covering all renderer widget families,
+  with Python/WebSocket tests, browser walkthrough, and a feature/test coverage map.
+- Fix issues exposed by the showcase: QTextEdit plain-text update field/signal,
+  root QObject property registration, nested tab/stack page counting, and
+  fractional QDoubleSpinBox button steps.
+- Consolidate experimental core/state modules onto the live implementations;
+  remove duplicate registries, placeholder serialization, and unused singletons.
+- Implement the Qt-style Property descriptor; fix bound-method disconnection and
+  isolate signal sender context across threads.
+- Repair JSON encoding without corrupting strings or exposing object attributes.
+- Apply application QSS using the correct browser protocol field; enforce the
+  documented conservative stylesheet policy in the live runtime.
+- Validate WebSocket Origin and event envelopes, enforce 64 KiB / 1,000 messages
+  per minute per connection limits, and reject loopback DNS-rebinding Host names.
+- Coalesce property changes at enqueue time, call listeners outside the registry
+  lock, and schedule debounce decisions on the server loop. Honor explicit full
+  refreshes even when the change queue is empty.
+- Replace import-only checks with behavioral and HTTP/WebSocket integration tests;
+  add a JavaScript renderer protocol test and update contributor instructions.
+- Preserve incremental updates received before a deferred full-tree render, add
+  Chromium coverage for input/focus, rich text, styles, painting, disposal,
+  reconnects, the four primary demos and the showcase, and add a versioned
+  benchmark harness with local baseline and post-scheduler JSON results.
+- Remove the external Google Fonts request; the frontend now uses its local
+  system-font fallback without making a runtime network request.
+- Make every layout adopt/detach widgets consistently; `deleteLater()` now
+  removes its layout item so a full refresh cannot resurrect a deleted widget.
+- Replace one thread per active `QTimer` with one shared monotonic deadline
+  scheduler; 100 active timers now use one scheduler thread.
+- Remove dead renderer state and redundant wrappers; share widget creation/update
+  helpers, text-control properties/constructors, and painting fallback behavior.
+  Keep public compatibility exports and unsupported-API stubs intact.
+- Fix tab/stack page-growth loops by assigning page classes before recounting.
+- Isolate outbound sockets with bounded per-client queues, resync on overflow,
+  send/close deadlines, and shutdown cleanup. Add deterministic stalled-client,
+  UTF-8 byte-bound, oversized-snapshot, and cancellation coverage.
+- Bound each outbox to eight pending messages / 8 MiB of UTF-8 payload, plus one
+  in-flight send. Use five-second send and two-second close deadlines; snapshots
+  exceeding 8 MiB close with code 1009. Limits are per connection, not aggregate.
+- Extend CI with Python 3.10–3.13 coverage, Node renderer checks, Chromium
+  walkthroughs, and a benchmark smoke job. Document the improvement backlog,
+  example coverage map, contributor commands, and remaining security boundaries.
+- Compatibility: unsupported CSS resource sheets are now rejected entirely;
+  experimental WidgetRegistry/SlotBinding classes are removed and experimental
+  Property is replaced by the Qt-style API. Normal Qt import usage is preserved.
+- Compatibility: timer callbacks now share one scheduler thread, so a slow slot
+  delays other timers. The server remains unauthenticated with shared application
+  state; the new transport checks do not make remote multi-user deployment safe.
+
+#### Verification (2026-09-02)
+
+- Local Python 3.12: 196 tests passed, including showcase callbacks, real
+  HTTP/WebSocket round trips, two-client updates/reconnect, and bounded outboxes.
+- Node: 11 renderer protocol/lifecycle tests passed. Ruff, JavaScript syntax,
+  and Git whitespace checks passed.
+- Chromium walkthroughs and real-Qt reference checks were not run locally;
+  browser coverage is configured in CI, not claimed as locally verified.
+- Benchmark results were recorded on a dirty local worktree and are diagnostic
+  evidence, not portable performance budgets or network-latency measurements.
+
+
 ### Compatibility
 - **Real `QObject`** at the root of the hierarchy — `objectName`, parent/child ownership,
   `blockSignals`/`signalsBlocked` (honoured by `Signal.emit`), `sender()`,
@@ -31,8 +94,8 @@ All notable changes to this project are documented here. The format is based on
   `aboutToQuit`); added `clipboard()`, app-wide `setStyleSheet()`, `applicationName` /
   `organizationName`, `setQuitOnLastWindowClosed`, `topLevelWidgets` / `activeWindow`,
   `primaryScreen` / `screens`. `QCoreApplication` / `QGuiApplication` are aliases.
-- **`QTimer`** uses one daemon thread per active timer instead of spawning a fresh
-  `threading.Timer` (a whole thread) on every tick.
+- **`QTimer`** originally moved away from a fresh `threading.Timer` on every tick;
+  it now uses the shared monotonic scheduler described above.
 - `PYSIDEWEB_STRICT=1` makes every unknown-API access raise instead of no-opping.
   Independently, `isFoo()`/`hasFoo()` predicate names raise from the fallback so
   `hasattr(w, "hasHeightForWidth")` is `False` and feature-detecting libraries take the

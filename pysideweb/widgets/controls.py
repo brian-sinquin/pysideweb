@@ -12,19 +12,27 @@ from ..core import (
 from .base import QWidget, _RangedMixin
 
 
-class QPushButton(QWidget):
+class _TextWidget(QWidget):
+    """Shared text property and constructor for text-bearing controls."""
+
+    text = Prop("", notify=True)
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._props["text"] = text
+
+
+class QPushButton(_TextWidget):
     _widget_type = "QPushButton"
 
     clicked = Signal()
 
-    text = Prop("", notify=True)
     checked = Prop(False, notify=True, getter="isChecked")
     checkable = Prop(False, getter="isCheckable")
     flat = Prop(False, getter="isFlat")
 
     def __init__(self, text: str = "", parent=None, icon=None):
-        super().__init__(parent)
-        self._props["text"] = text
+        super().__init__(text, parent)
         self._icon = icon or QIcon()
         self._auto_default = False
 
@@ -54,12 +62,11 @@ class QPushButton(QWidget):
             self.clicked.emit(self.isChecked() if self.isCheckable() else False)
 
 
-class QLabel(QWidget):
+class QLabel(_TextWidget):
     _widget_type = "QLabel"
 
     linkActivated = Signal(str)
 
-    text = Prop("", notify=True)
     alignment = Prop(0, cast=int)
     wordWrap = Prop(False)
     # None of these four had a getter in the hand-written version (only the
@@ -70,8 +77,7 @@ class QLabel(QWidget):
     textFormat = Prop(0)  # PlainText
 
     def __init__(self, text: str = "", parent=None):
-        super().__init__(parent)
-        self._props["text"] = text
+        super().__init__(text, parent)
         self._pixmap = None
         self._buddy = None
 
@@ -88,7 +94,7 @@ class QLabel(QWidget):
         self._buddy = buddy
 
 
-class QLineEdit(QWidget):
+class QLineEdit(_TextWidget):
     _widget_type = "QLineEdit"
 
     textChanged = Signal(str)
@@ -101,7 +107,6 @@ class QLineEdit(QWidget):
         NoEcho = 1
         PasswordEchoOnEdit = 3
 
-    text = Prop("", notify=True)
     placeholder = Prop("", in_props=True)
     readOnly = Prop(False, getter="isReadOnly")
     echoMode = Prop(EchoMode.Normal)
@@ -110,10 +115,6 @@ class QLineEdit(QWidget):
     # before) -- in_props=False keeps that, while still getting a real
     # maxLength()/setMaxLength() pair instead of a write-only attribute.
     maxLength = Prop(32767, in_props=False)
-
-    def __init__(self, text: str = "", parent=None):
-        super().__init__(parent)
-        self._props["text"] = text
 
     def setPlaceholderText(self, text: str):
         self.setPlaceholder(text)
@@ -157,6 +158,13 @@ class QTextEdit(QWidget):
 
     def toPlainText(self) -> str:
         return self.plainText()
+
+    def setPlainText(self, text: str):
+        previous = self.plainText()
+        self._props["plainText"] = text
+        self._notify("text", text)  # same field as full-tree serialization
+        if text != previous:
+            self.textChanged.emit()
 
     def setText(self, text: str):
         self.setPlainText(text)
@@ -211,8 +219,7 @@ class QComboBox(QWidget):
         self._notify("items", self._items)
 
     def addItems(self, texts: list[str]):
-        for t in texts:
-            self._items.append(t)
+        self._items.extend(texts)
         if self.currentIndex() < 0 and self._items:
             self.setCurrentIndex(0)
         self._notify("items", self._items)
@@ -258,19 +265,14 @@ class QComboBox(QWidget):
             self.currentTextChanged.emit(self.currentText())
 
 
-class QCheckBox(QWidget):
+class QCheckBox(_TextWidget):
     _widget_type = "QCheckBox"
 
     stateChanged = Signal(int)
     toggled = Signal(bool)
 
-    text = Prop("", notify=True)
     checked = Prop(False, notify=True, getter="isChecked")
     tristate = Prop(False, getter="isTristate")
-
-    def __init__(self, text: str = "", parent=None):
-        super().__init__(parent)
-        self._props["text"] = text
 
     def checkState(self):
         return Qt.Checked if self.isChecked() else Qt.Unchecked
@@ -282,17 +284,12 @@ class QCheckBox(QWidget):
             self.toggled.emit(self.isChecked())
 
 
-class QRadioButton(QWidget):
+class QRadioButton(_TextWidget):
     _widget_type = "QRadioButton"
 
     toggled = Signal(bool)
 
-    text = Prop("", notify=True)
     checked = Prop(False, notify=True, getter="isChecked")
-
-    def __init__(self, text: str = "", parent=None):
-        super().__init__(parent)
-        self._props["text"] = text
 
     def _handle_event(self, event_type, value):
         if event_type == "toggled":
@@ -342,9 +339,6 @@ class QDial(_RangedMixin, QWidget):
     singleStep = Prop(1)
     notchesVisible = Prop(False)
     wrapping = Prop(False)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
 
     def _handle_event(self, event_type, value):
         if event_type == "valueChanged":

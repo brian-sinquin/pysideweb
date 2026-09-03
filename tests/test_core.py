@@ -1,5 +1,8 @@
 """Tests for the pure-Python QtCore reimplementation."""
 
+import threading
+import time
+
 from pysideweb import core
 
 
@@ -90,3 +93,39 @@ class TestQApplication:
     def test_instance_is_singleton(self):
         app = core.QApplication([])
         assert core.QApplication.instance() is app
+
+
+class TestQTimer:
+    def test_many_timers_share_one_scheduler_thread(self):
+        before = threading.active_count()
+        timers = [core.QTimer() for _ in range(50)]
+        for timer in timers:
+            timer.start(60_000)
+        try:
+            assert threading.active_count() <= before + 1
+        finally:
+            for timer in timers:
+                timer.stop()
+
+    def test_periodic_stop_and_restart(self):
+        timer = core.QTimer()
+        fired = threading.Event()
+        calls = []
+        timer.timeout.connect(lambda: (calls.append(time.monotonic()), fired.set()))
+        timer.start(10)
+        assert fired.wait(1)
+        timer.stop()
+        stopped_at = len(calls)
+        time.sleep(0.04)
+        assert len(calls) == stopped_at
+
+        fired.clear()
+        timer.start(5)
+        assert fired.wait(1)
+        timer.stop()
+        assert len(calls) == stopped_at + 1
+
+    def test_single_shot_survives_without_caller_reference(self):
+        fired = threading.Event()
+        core.QTimer.singleShot(5, fired.set)
+        assert fired.wait(1)

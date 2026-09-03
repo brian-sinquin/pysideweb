@@ -36,6 +36,38 @@ jobs:
       - name: Run tests
         run: uv run pytest -q
 
+  renderer:
+    name: Browser and renderer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra dev
+      - run: npm install --no-save --no-package-lock @playwright/test@1.55.1
+      - run: node --test tests_js/*.test.cjs
+      - name: Install Chromium test runner
+        run: npx playwright install --with-deps chromium
+      - name: Run browser end-to-end tests
+        run: npx playwright test --config tests_browser/playwright.config.cjs
+
+  benchmark-smoke:
+    name: Benchmark harness smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra dev
+      - run: uv run python benchmarks/benchmark.py --sizes 100 --samples 2 --warmups 1
+
   crosscheck:
     name: Reference values vs real PySide6
     runs-on: ubuntu-latest

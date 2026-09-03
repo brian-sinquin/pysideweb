@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-09-02T17:38:15Z",
+  "environment": {
+    "python": "3.12.13",
+    "implementation": "CPython",
+    "platform": "Linux-6.18.35-x86_64-with-glibc2.39",
+    "processor": "x86_64",
+    "cpu_count": 9,
+    "commit": "95a0adfddd6c1453e6569972ea3a9bb1eb3e2334",
+    "branch": "fix/runtime-integration",
+    "dirty": true
+  },
+  "config": {
+    "sizes": [
+      100,
+      1000,
+      10000
+    ],
+    "samples": 7,
+    "warmups": 2,
+    "queue_writes": 10000,
+    "qss_iterations": 10000,
+    "timers": 100,
+    "output": "benchmarks/results/baseline-local.json"
+  },
+  "benchmarks": [
+    {
+      "name": "cold_import",
+      "seconds": {
+        "min": 0.03262680599982559,
+        "median": 0.03520866200051387,
+        "p95": 0.05679904099997657,
+        "max": 0.05679904099997657
+      }
+    },
+    {
+      "name": "widget_tree",
+      "widgets": 100,
+      "construction_seconds": {
+        "min": 0.001953637000042363,
+        "median": 0.0020265349994588178,
+        "p95": 0.0020811169997614343,
+        "max": 0.0020811169997614343
+      },
+      "serialization_seconds": {
+        "min": 0.0035481690010783495,
+        "median": 0.0036361999991640914,
+        "p95": 0.0037972299996908987,
+        "max": 0.0037972299996908987
+      },
+      "wire_bytes": {
+        "min": 32904,
+        "median": 32904,
+        "p95": 32904,
+        "max": 32904
+      },
+      "peak_traced_bytes": {
+        "min": 314269,
+        "median": 314333,
+        "p95": 314405,
+        "max": 314405
+      }
+    },
+    {
+      "name": "widget_tree",
+      "widgets": 1000,
+      "construction_seconds": {
+        "min": 0.019061351000345894,
+        "median": 0.0193902099999832,
+        "p95": 0.022990178000327433,
+        "max": 0.022990178000327433
+      },
+      "serialization_seconds": {
+        "min": 0.0335719410013553,
+        "median": 0.035080926998489304,
+        "p95": 0.037421848999656504,
+        "max": 0.037421848999656504
+      },
+      "wire_bytes": {
+        "min": 328205,
+        "median": 328205,
+        "p95": 328205,
+        "max": 328205
+      },
+      "peak_traced_bytes": {
+        "min": 3077538,
+        "median": 3077602,
+        "p95": 3077650,
+        "max": 3077650
+      }
+    },
+    {
+      "name": "widget_tree",
+      "widgets": 10000,
+      "construction_seconds": {
+        "min": 0.23082739200071956,
+        "median": 0.24311181700068119,
+        "p95": 0.265998431999833,
+        "max": 0.265998431999833
+      },
+      "serialization_seconds": {
+        "min": 0.35188582699993276,
+        "median": 0.37234250999972573,
+        "p95": 0.39089742100077274,
+        "max": 0.39089742100077274
+      },
+      "wire_bytes": {
+        "min": 3299206,
+        "median": 3299206,
+        "p95": 3299206,
+        "max": 3299206
+      },
+      "peak_traced_bytes": {
+        "min": 30431857,
+        "median": 30431857,
+        "p95": 30431905,
+        "max": 30431905
+      }
+    },
+    {
+      "name": "change_queue",
+      "writes": 10000,
+      "distinct_properties": false,
+      "enqueue_seconds": {
+        "min": 0.003017356999407639,
+        "median": 0.003323353001178475,
+        "p95": 0.003529047999109025,
+        "max": 0.003529047999109025
+      },
+      "pending_entries": {
+        "min": 1,
+        "median": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "wire_bytes": {
+        "min": 64,
+        "median": 64,
+        "p95": 64,
+        "max": 64
+      }
+    },
+    {
+      "name": "change_queue",
+      "writes": 10000,
+      "distinct_properties": true,
+      "enqueue_seconds": {
+        "min": 0.0043265349995635916,
+        "median": 0.004410850000567734,
+        "p95": 0.0054697249997843755,
+        "max": 0.0054697249997843755
+      },
+      "pending_entries": {
+        "min": 10000,
+        "median": 10000,
+        "p95": 10000,
+        "max": 10000
+      },
+      "wire_bytes": {
+        "min": 667781,
+        "median": 667781,
+        "p95": 667781,
+        "max": 667781
+      }
+    },
+    {
+      "name": "qss_translation",
+      "iterations": 10000,
+      "seconds": {
+        "min": 0.07579852799972286,
+        "median": 0.07636309800000163,
+        "p95": 0.07884335600101622,
+        "max": 0.07884335600101622
+      }
+    },
+    {
+      "name": "active_timers",
+      "timers": 100,
+      "threads_before": 1,
+      "threads_active": 101
+    }
+  ]
+}

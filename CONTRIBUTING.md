@@ -27,7 +27,16 @@ Before opening a pull request, make sure both of these pass:
 
 ```bash
 ruff check .      # lint
-pytest -q         # tests
+pytest -q         # Python tests
+node --test tests_js/*.test.cjs  # renderer protocol tests (Node.js 22+)
+python benchmarks/benchmark.py   # JSON performance baseline
+```
+
+Chromium end-to-end tests run in CI. Locally, install `@playwright/test@1.55.1`
+and its Chromium binary, then run:
+
+```bash
+npx playwright test --config tests_browser/playwright.config.cjs
 ```
 
 Auto-fix lint issues where safe:
@@ -48,7 +57,7 @@ pysideweb/
 ├── __init__.py       # installs the import interceptor on import
 ├── interceptor.py    # patches sys.modules → PySide6.* become virtual
 ├── core.py           # QtCore: Signal/Slot, Qt enums, value types, QTimer, QApplication
-├── widgets.py        # virtual QWidget subclasses
+├── widgets/          # virtual QWidget subclasses, grouped by responsibility
 ├── layouts.py        # virtual layouts
 ├── state.py          # widget registry, JSON serializer, diff + event dispatch
 ├── server.py         # aiohttp HTTP + WebSocket server (daemon thread)
@@ -62,10 +71,11 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for a deeper tour.
 
 ## Adding a new widget
 
-1. Add the class to `pysideweb/widgets.py`, subclassing `QWidget`. Give it a
+1. Add the class to the appropriate module in `pysideweb/widgets/`, subclassing
+   `QWidget`, and re-export it from `pysideweb/widgets/__init__.py`. Give it a
    `_widget_type` string and implement `_get_props()` (and `_handle_event()` if it is
    interactive).
-2. Register the class name in `interceptor._build_qtwidgets_namespace()`.
+2. The interceptor discovers exported `Q*` classes automatically; no registry edit is needed.
 3. Teach the browser renderer (`pysideweb/static/renderer.js`) how to render it.
 4. Add a test in `tests/` covering props and any events.
 
@@ -75,7 +85,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for a deeper tour.
 - Match the surrounding code style (naming, comment density, idioms).
 - Add or update tests for behavior changes.
 - Update `README.md` / `CHANGELOG.md` when you add user-facing features.
-- Make sure `ruff check .` and `pytest -q` are green.
+- Make sure `ruff check .`, `pytest -q`, and `node --test tests_js/*.test.cjs` are green.
 
 ## Reporting bugs / requesting features
 

@@ -27,6 +27,9 @@ ENV/
 .coverage.*
 htmlcov/
 coverage.xml
+node_modules/
+test-results/
+playwright-report/
 
 # Tooling
 .tox/

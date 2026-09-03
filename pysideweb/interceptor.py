@@ -66,24 +66,7 @@ def _build_qtcore_namespace() -> dict[str, Any]:
 
     ns['Slot'] = Slot
 
-    # Property (simple stub)
-    class Property:
-        def __init__(self, type_=None, fget=None, fset=None, notify=None):
-            self._fget = fget
-            self._fset = fset
-
-        def __call__(self, func):
-            return func
-
-        def getter(self, func):
-            self._fget = func
-            return self
-
-        def setter(self, func):
-            self._fset = func
-            return self
-
-    ns['Property'] = Property
+    ns['Property'] = core.Property
 
     # Real object hierarchy + value types (see core.py).
     ns['QObject'] = core.QObject

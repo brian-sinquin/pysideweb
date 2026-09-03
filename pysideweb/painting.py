@@ -90,7 +90,16 @@ def _color_to_css(value: Any) -> str | None:
 # QPen / QBrush
 # ---------------------------------------------------------------------------
 
-class QPen:
+class _PaintingFallback:
+    """Keep unsupported public painting calls inert; private lookups must fail."""
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return _AutoAttr()
+
+
+class QPen(_PaintingFallback):
     """Stroke description: colour, width, dash style, cap and join.
 
     Constructor forms mirror Qt's:
@@ -174,11 +183,6 @@ class QPen:
             "join": _JOIN_CSS.get(self._join, "miter"),
         }
 
-    def __getattr__(self, name: str):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return _AutoAttr()
-
 
 class QGradient:
     """Base for the gradient types; carries the colour stops."""
@@ -234,7 +238,7 @@ class QRadialGradient(QGradient):
         }
 
 
-class QBrush:
+class QBrush(_PaintingFallback):
     """Fill description: a solid colour, ``Qt.NoBrush``, or a gradient."""
 
     def __init__(self, *args):
@@ -284,17 +288,12 @@ class QBrush:
             return {"op": "brush", "color": None, "gradient": None}
         return {"op": "brush", "color": _color_to_css(self._color), "gradient": None}
 
-    def __getattr__(self, name: str):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return _AutoAttr()
-
 
 # ---------------------------------------------------------------------------
 # QPainterPath
 # ---------------------------------------------------------------------------
 
-class QPainterPath:
+class QPainterPath(_PaintingFallback):
     """Records path segments as ``[op, *coords]`` lists for canvas replay."""
 
     def __init__(self, start=None):
@@ -358,11 +357,6 @@ class QPainterPath:
 
     def _wire(self):
         return list(self._segments)
-
-    def __getattr__(self, name: str):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return _AutoAttr()
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +492,7 @@ class QPixmap(QImage):
 # QPainter — the recorder
 # ---------------------------------------------------------------------------
 
-class QPainter:
+class QPainter(_PaintingFallback):
     """Records drawing calls as JSON commands for canvas replay.
 
     Construct it with the device to paint on — a widget inside its own
@@ -807,11 +801,6 @@ class QPainter:
 
     def commands(self) -> list[dict]:
         return self._commands
-
-    def __getattr__(self, name: str):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return _AutoAttr()
 
 
 # Per-character width as a fraction of the font size, for a proportional

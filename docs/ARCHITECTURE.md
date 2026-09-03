@@ -55,7 +55,10 @@ The QtCore surface, reimplemented in pure Python:
 - **Value types** — `QSize`/`QSizeF`, `QPoint`/`QPointF`, `QRect`/`QRectF`, `QLine`/`QLineF`
   (operator- and method-complete), `QColor` (hex + CSS-name parsing with channel
   readback), `QFont`, `QUrl`, `QModelIndex`, `QSettings` (JSON-file backed).
-- **`QTimer`** — one daemon thread per active timer, sleeping on an `Event` between ticks.
+- **`QTimer`** — one process-wide daemon scheduler with a monotonic deadline heap.
+  Callbacks are serialized on that scheduler thread, matching a single event-loop
+  owner more closely and avoiding linear thread growth. Long callbacks delay
+  other timers, so applications should keep timer slots short.
 - **`QApplication`** — `exec()` starts the web server, opens a browser, and blocks on a
   quit `Event`; `quit()` unblocks it and `aboutToQuit` fires.
 
@@ -105,6 +108,14 @@ An `aiohttp` app in a **daemon thread** with its own event loop:
 - Broadcasts are **debounced** (~50 ms → max ~20 updates/sec) so bursty property changes
   coalesce into a single frame.
 - Inbound messages are decoded and handed to `state.dispatch_event()`.
+- Each client owns one writer task: broadcasts serialize once and enqueue without
+  waiting for sockets. Pending payload is capped at eight messages / 8 MiB, plus
+  one in-flight send. Overflow substitutes a lazily built full snapshot for stale
+  deltas. A full refresh also replaces queued deltas; subsequent changes follow it.
+- Sends have a five-second timeout; an oversized snapshot closes with code 1009.
+  Shutdown cancels writers and closes sockets, falling back to transport closure
+  if the two-second close deadline expires. These are per-client queue limits,
+  not aggregate memory or connection limits.
 
 ### `static/`
 The browser client: `renderer.js` reconstructs the DOM from the JSON tree, applies
@@ -155,3 +166,28 @@ bare declaration list is still applied inline. Custom `paintEvent` output arrive
   reproduced exactly.
 - `QFontMetrics` is approximate — there is no font engine server-side, so text widths
   come from a per-character factor table, not real shaping.
+
+
+## Runtime consolidation
+
+`core.py` and `state.py` are the canonical implementations. The former experimental
+`core_refactored.py` and `state_refactored.py` modules now re-export live APIs;
+`integration.init_refactored_modules()` returns the real runtime modules without
+creating a second registry. The experimental `WidgetRegistry` and `SlotBinding`
+classes have been removed; they were incomplete and not public Qt APIs. The
+experimental Property signature has been replaced with the Qt-style descriptor.
+
+Signal sender identity uses a ContextVar, isolating concurrent threads and nested
+emissions. Slot argument arity is computed on connection. State changes coalesce
+on enqueue by widget/property, and listeners execute outside the registry lock.
+Broadcast debounce decisions run on the server loop.
+
+The full-tree envelope carries `appStyleSheetCss`, which the renderer applies via
+style.textContent. Full and incremental messages use SafeJSONEncoder, preserving
+JSON values while escaping HTML delimiters. Rich-text sanitization remains a
+separate browser responsibility. The conservative QSS policy is enforced when
+setting widget/application styles and when translating QSS directly.
+
+The WebSocket route checks Origin, limits message size/rate, and validates event
+envelopes before dispatch. This is boundary hardening, not authentication or
+per-session isolation. See README for the supported network model.

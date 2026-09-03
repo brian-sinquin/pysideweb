@@ -11,10 +11,14 @@ import asyncio
 import json
 import os
 import threading
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from . import state
+from .security import SafeJSONEncoder
+from .websocket_validator import WebSocketValidator
 
 if TYPE_CHECKING:
     from aiohttp import web
@@ -32,8 +36,102 @@ _server_loop: asyncio.AbstractEventLoop | None = None
 _server_started = threading.Event()
 _server_error: str | None = None
 _start_lock = threading.Lock()
-_clients: set[web.WebSocketResponse] = set()
+_clients: set[_Client] = set()
 _static_dir = Path(__file__).parent / "static"
+
+_MAX_PENDING_MESSAGES = 8
+_MAX_PENDING_BYTES = 8 * 1024 * 1024
+_SEND_TIMEOUT = 5.0
+_CLOSE_TIMEOUT = 2.0
+
+
+class _Client:
+    """Loop-owned outbox. Overflow replaces stale deltas with a fresh snapshot."""
+
+    def __init__(self, ws, transport=None):
+        self.ws = ws
+        self.transport = transport
+        self.pending: deque[tuple[str, int] | None] = deque()
+        self.pending_bytes = 0
+        self.resync_pending = False
+        self.closed = False
+        self._close_task = None
+        self.ready = asyncio.Event()
+        self.writer = asyncio.create_task(self._write(), name="pysideweb-writer")
+
+    def _clear(self):
+        self.pending.clear()
+        self.pending_bytes = 0
+        self.resync_pending = False
+
+    def enqueue(self, message: str, full_refresh: bool = False):
+        if self.closed:
+            return
+        if full_refresh:
+            self._clear()
+        elif self.resync_pending:
+            return  # the snapshot is built later, after the blocked send finishes
+        size = len(message.encode("utf-8"))
+        if len(self.pending) >= _MAX_PENDING_MESSAGES or self.pending_bytes + size > _MAX_PENDING_BYTES:
+            self._clear()
+            self.pending.append(None)
+            self.resync_pending = True
+        else:
+            self.pending.append((message, size))
+            self.pending_bytes += size
+        self.ready.set()
+
+    async def _write(self):
+        close_code = 1000
+        try:
+            while True:
+                await self.ready.wait()
+                while self.pending:
+                    entry = self.pending.popleft()
+                    if entry is None:
+                        self.resync_pending = False
+                        message = state.full_tree_json()
+                        if len(message.encode("utf-8")) > _MAX_PENDING_BYTES:
+                            close_code = 1009
+                            return
+                    else:
+                        message, size = entry
+                        self.pending_bytes -= size
+                    await asyncio.wait_for(self.ws.send_str(message), timeout=_SEND_TIMEOUT)
+                self.ready.clear()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            close_code = 1011
+        finally:
+            self.closed = True
+            self._clear()
+            await self._close_socket(close_code)
+
+    async def _close_socket(self, code=1000):
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._finish_close(code))
+        await asyncio.shield(self._close_task)
+
+    async def _finish_close(self, code):
+        try:
+            await asyncio.wait_for(self.ws.close(code=code), timeout=_CLOSE_TIMEOUT)
+        except Exception:
+            if self.transport is not None:
+                self.transport.close()
+        finally:
+            _clients.discard(self)
+
+    async def close(self):
+        self.closed = True
+        self.writer.cancel()
+        await asyncio.gather(self.writer, return_exceptions=True)
+        self._clear()
+        await self._close_socket()
+
+
+async def _close_clients(app):
+    await asyncio.gather(*(client.close() for client in tuple(_clients)))
 
 
 # ---------------------------------------------------------------------------
@@ -41,41 +139,42 @@ _static_dir = Path(__file__).parent / "static"
 # ---------------------------------------------------------------------------
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse(heartbeat=30.0)
+    origin = request.headers.get("Origin")
+    if origin is not None and origin != f"{request.scheme}://{request.host}":
+        raise web.HTTPForbidden(text="WebSocket origin must match the application")
+    validator = WebSocketValidator()
+    ws = web.WebSocketResponse(heartbeat=30.0, max_msg_size=64 * 1024)
     await ws.prepare(request)
 
-    _clients.add(ws)
+    client = _Client(ws, request.transport)
+    _clients.add(client)
     print(f"[PySideWeb] Browser connected ({len(_clients)} client(s))")
 
-    # Send full tree on connect
     try:
-        tree_json = state.full_tree_json()
-        await ws.send_str(tree_json)
-    except Exception as e:
-        print(f"[PySideWeb] Error sending initial tree: {e}")
-
-    try:
+        client.enqueue(state.full_tree_json(), full_refresh=True)
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
                 try:
+                    valid, reason = validator.validate_message("connection", msg.data)
+                    if not valid:
+                        await ws.close(code=1008, message=reason.encode())
+                        break
                     event = json.loads(msg.data)
+                    if not validator.validate_event(event):
+                        await ws.close(code=1008, message=b"Invalid event")
+                        break
                     state.dispatch_event(event)
-                    # dispatch_event's signal handlers call state.notify_* which
-                    # pokes the listener -> a debounced broadcast is scheduled.
-                    # (Previously this sent a full tree synchronously per event,
-                    # so a browser-driven slider drag round-tripped the whole
-                    # tree once per pixel.) Nudge the scheduler in case the
-                    # handler changed nothing observable but we still want to
-                    # confirm state to the client.
+                    # Event handlers share the state-change broadcast debounce.
                     _schedule_broadcast()
-                except json.JSONDecodeError:
-                    pass
+                except (json.JSONDecodeError, RecursionError):
+                    await ws.close(code=1008, message=b"Invalid JSON")
+                    break
                 except Exception as e:
                     print(f"[PySideWeb] Event error: {e}")
             elif msg.type == web.WSMsgType.ERROR:
                 print(f"[PySideWeb] WebSocket error: {ws.exception()}")
     finally:
-        _clients.discard(ws)
+        await client.close()
         print(f"[PySideWeb] Browser disconnected ({len(_clients)} client(s))")
 
     return ws
@@ -100,7 +199,7 @@ async def _broadcast_tree(full_refresh: bool = False):
         return
 
     changes = state.drain_changes()
-    if not changes:
+    if not changes and not full_refresh:
         return
 
     # Check if a full refresh is requested in any queued changes
@@ -113,28 +212,25 @@ async def _broadcast_tree(full_refresh: bool = False):
         msg_json = json.dumps({
             "type": "updates",
             "updates": [c for c in changes if c.get("type") == "update"]
-        })
+        }, cls=SafeJSONEncoder)
 
-    dead: list[web.WebSocketResponse] = []
-    for ws in list(_clients):
-        try:
-            await ws.send_str(msg_json)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        _clients.discard(ws)
+    # Serialization is shared; socket I/O happens only in independent writers.
+    for client in tuple(_clients):
+        client.enqueue(msg_json, full_refresh=has_full_refresh)
 
 
 def _schedule_broadcast():
-    """Schedule a broadcast if one isn't already pending."""
+    """Marshal debounce decisions to the server loop, avoiding cross-thread races."""
+    loop = _server_loop
+    if loop is not None and not loop.is_closed():
+        loop.call_soon_threadsafe(_schedule_on_loop)
+
+
+def _schedule_on_loop():
     global _broadcast_scheduled
-    if _broadcast_scheduled:
-        return
-    _broadcast_scheduled = True
-    if _server_loop:
-        _server_loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(_delayed_broadcast())
-        )
+    if not _broadcast_scheduled:
+        _broadcast_scheduled = True
+        asyncio.create_task(_delayed_broadcast())
 
 
 async def _delayed_broadcast():
@@ -163,6 +259,16 @@ async def _no_cache_static(request, handler):
     """The renderer/CSS are edited in place during development and the app is
     long-running; without this the browser serves a stale renderer.js/style.css
     after an update until a hard reload."""
+    # Reject DNS-rebinding hostnames when bound to loopback. Wider bindings
+    # explicitly opt into network access and still enforce WebSocket Origin.
+    bind_host = os.environ.get("PYSIDEWEB_HOST", "127.0.0.1")
+    if bind_host in {"127.0.0.1", "localhost", "::1"}:
+        try:
+            hostname = urlsplit("//" + request.host).hostname
+        except ValueError:
+            hostname = None
+        if hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise web.HTTPForbidden(text="Unrecognized loopback host")
     resp = await handler(request)
     if request.path.startswith("/static/"):
         resp.headers["Cache-Control"] = "no-cache, must-revalidate"
@@ -174,7 +280,11 @@ async def _no_cache_static(request, handler):
 # ---------------------------------------------------------------------------
 
 def _create_app():
+    global web
+    if web is None:
+        from aiohttp import web
     app = web.Application(middlewares=[web.middleware(_no_cache_static)])
+    app.on_shutdown.append(_close_clients)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/", index_handler)
     app.router.add_static("/static/", path=str(_static_dir), name="static")
